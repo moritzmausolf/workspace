@@ -61,9 +61,9 @@ VENV_PY="$APP_DIR/.venv/bin/python3"
 "$VENV_PY" -m pip install --quiet telethon || die "could not install Telethon (check your internet connection)"
 info "ready"
 
-# ---------------------------------------------------------------- telegram
-say "4/5  Telegram"
-"$VENV_PY" "$APP_DIR/setup_helper.py" || die "Telegram setup did not finish"
+# ---------------------------------------------------------------- accounts
+say "4/5  Signing in"
+"$VENV_PY" "$APP_DIR/setup_helper.py" || die "sign-in did not finish"
 
 # ---------------------------------------------------------------- service
 say "5/5  Starting it in the background"

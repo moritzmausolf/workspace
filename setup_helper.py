@@ -42,14 +42,15 @@ def save(cfg):
 
 def verify_mailbox(cfg):
     """Make sure the IMAP credentials work before we install anything."""
+    print("\n  --- Mailbox ---")
     if cfg.get("password"):
         if try_imap(cfg, cfg["password"], quiet=True):
-            print("  Mailbox: credentials already working.")
+            print("  Credentials already working.")
             return
-        print("  Mailbox: the saved password was rejected.")
+        print("  The saved password was rejected.")
 
-    print(f"\n  Password for {cfg['email']}")
-    print("  (typing is hidden)")
+    print(f"\n  Your EMAIL password for {cfg['email']}")
+    print("  (this is the mailbox password, not Telegram - typing is hidden)")
     for attempt in range(3):
         password = ask_secret("  Password: ")
         if not password:
@@ -135,6 +136,7 @@ async def pick_chat(client):
 
 
 async def setup_telegram(cfg):
+    print("\n  --- Telegram ---")
     client = TelegramClient(
         str(SESSION_PATH), cfg["telegram_api_id"], cfg["telegram_api_hash"]
     )
@@ -144,7 +146,7 @@ async def setup_telegram(cfg):
         await sign_in(client, cfg["telegram_phone"])
 
     me = await client.get_me()
-    print(f"  Telegram: signed in as {me.first_name}.")
+    print(f"  Signed in as {me.first_name}.")
 
     chat_id, _kind, name = await pick_chat(client)
     cfg["telegram_chat_id"] = str(chat_id)
