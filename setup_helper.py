@@ -115,12 +115,18 @@ async def sign_in(client, phone):
         code = ask("  Code (or 'r' to resend): ")
 
         if code.lower() in ("r", "resend"):
-            try:
-                sent = await client(ResendCodeRequest(
-                    phone_number=phone, phone_code_hash=sent.phone_code_hash))
-                print(f"  Resent via {describe(sent.type)}.\n")
-            except Exception as exc:
-                print(f"  Could not resend ({exc}).\n")
+            # Telegram answers the first resend with an error that is itself the
+            # trigger for the next delivery method, so a second attempt is normal.
+            for retry in range(2):
+                try:
+                    sent = await client(ResendCodeRequest(
+                        phone_number=phone, phone_code_hash=sent.phone_code_hash))
+                    print(f"  Resent via {describe(sent.type)}.\n")
+                    break
+                except Exception as exc:
+                    if retry == 0:
+                        continue
+                    print(f"  Could not resend: {exc}\n")
             continue
 
         attempt += 1
