@@ -209,13 +209,61 @@ def extract_body(msg):
     return body.strip()
 
 
-def format_message(msg):
+# Words that tend to sit beside the code rather than beside an order number,
+# a year or a tracking reference.
+CODE_CONTEXT = re.compile(
+    r"(?i)\b(code|verification|verify|confirm\w*|otp|one[\s-]?time|passcode|pin)\b")
+
+
+def find_code(subject, body, pattern):
+    """
+    Pull a short code out of an email.
+
+    A bare number is ambiguous, so prefer one that stands alone on its line or
+    sits next to wording about codes, and only then fall back to the first
+    match anywhere.
+    """
+    try:
+        rx = re.compile(pattern)
+    except re.error as exc:
+        log(f"code_pattern is not a valid expression ({exc}) - sending the full email")
+        return None
+
+    def captured(match):
+        return match.group(1) if match.groups() else match.group(0)
+
+    for source in (subject, body):
+        for line in source.splitlines():
+            line = line.strip()
+            found = rx.search(line)
+            if found and (line == captured(found) or CODE_CONTEXT.search(line)):
+                return captured(found)
+
+    for source in (subject, body):
+        found = rx.search(source)
+        if found:
+            return captured(found)
+    return None
+
+
+def format_message(msg, cfg=None):
     sender = decode_mime_header(msg.get("From", "Unknown"))
     subject = decode_mime_header(msg.get("Subject", "(no subject)"))
+    body = extract_body(msg)
+
+    pattern = (cfg or {}).get("code_pattern", "")
+    if pattern:
+        code = find_code(subject, body, pattern)
+        if code:
+            # <code> renders monospaced and copies on tap in Telegram.
+            return (f"<code>{html.escape(code)}</code>\n"
+                    f"<i>{html.escape(subject)}</i>")
+        log("No code found in this email - sending it in full")
+
     text = (
         f"<b>{html.escape(subject)}</b>\n"
         f"<i>from {html.escape(sender)}</i>\n\n"
-        f"{html.escape(extract_body(msg))}"
+        f"{html.escape(body)}"
     )
     if len(text) > TELEGRAM_LIMIT:
         text = text[: TELEGRAM_LIMIT - 20].rstrip() + "\n[...truncated]"
@@ -320,7 +368,7 @@ def check_mailbox(mail, cfg):
                 log(f"Forwarding from {sender}: {decode_mime_header(msg.get('Subject', ''))}")
                 try:
                     send_message(cfg["telegram_bot_token"], cfg["telegram_chat_id"],
-                                 format_message(msg))
+                                 format_message(msg, cfg))
                 except TelegramError as exc:
                     log(f"Could not send ({exc}) - retrying on the next pass")
                     break  # stop here so nothing after it is skipped

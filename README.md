@@ -51,7 +51,8 @@ cp installer_config.example.json installer_config.json
 |---|---|
 | `imap_server`, `imap_port` | Mail server, e.g. `imap.hostinger.com` / `993` |
 | `email` | Mailbox to watch |
-| `watch_senders` | Addresses to forward; substring match |
+| `watch_senders` | Addresses to forward. An entry with `@` must match the whole address; a bare domain covers its subdomains |
+| `code_pattern` | When set, forward only the matched code instead of the whole email. Leave empty to send the full message |
 | `mode` | `idle` (instant) or `poll` (every 15s) |
 | `dashboard_port` | Port for the pause page |
 
@@ -69,7 +70,26 @@ the installer collects them and verifies each one before writing it.
 | Remove | stop it, then delete `~/EmailForwarder` and the plist |
 
 Pausing drops matching mail rather than queuing it, so resuming does not replay
-a backlog. A send that fails is left unmarked and retried on the next pass.
+a backlog. A send that fails is retried on the next pass, and the messages behind
+it wait rather than being skipped.
+
+Progress is a high-water mark on the IMAP UID, so nothing is re-sent however
+large the mailbox grows, and mail read elsewhere first is still forwarded. A new
+install starts from the current end of the mailbox rather than replaying history.
+
+## Forwarding only a code
+
+With `code_pattern` set to something like `\b(\d{6})\b`, a verification email
+arrives as just the code, formatted so Telegram copies it on tap:
+
+```
+123456
+Email verification code
+```
+
+A bare number is ambiguous, so the match is taken from a line holding nothing
+else or one mentioning a code, falling back to the first match anywhere. When no
+code is found the full email is sent instead, so nothing is quietly lost.
 
 ## Layout
 

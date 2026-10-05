@@ -23,6 +23,7 @@ DEFAULTS = {
     "password": "",             # asked for during setup
     "telegram_bot_token": "",   # asked for during setup
     "telegram_chat_id": "",     # chosen during setup
+    "code_pattern": "",         # when set, forward just the matched code
     "mode": "idle",
     "dashboard_port": 9876,
 }

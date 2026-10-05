@@ -41,14 +41,11 @@ cat > "$APP_DIR/setup_helper.py" <<'HELPER_EOF'
 __HELPER_PY__
 HELPER_EOF
 
-if [ -f "$APP_DIR/config.json" ]; then
-  info "keeping the existing config.json"
-else
-  cat > "$APP_DIR/config.json" <<'CONFIG_EOF'
+# Written every time; setup_helper merges it into config.json so a new setting
+# reaches an existing install without disturbing what is already configured.
+cat > "$APP_DIR/config.defaults.json" <<'CONFIG_EOF'
 __CONFIG_JSON__
 CONFIG_EOF
-  info "config.json written"
-fi
 info "installed (no extra libraries needed)"
 
 # ---------------------------------------------------------------- accounts

@@ -2,11 +2,10 @@
   "imap_server": "imap.hostinger.com",
   "imap_port": 993,
   "email": "you@yourdomain.com",
-
   "watch_senders": [
     "sender@example.com"
   ],
-
+  "code_pattern": "\\b(\\d{6})\\b",
   "mode": "idle",
   "dashboard_port": 9876
 }

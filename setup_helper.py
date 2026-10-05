@@ -13,6 +13,7 @@ from email_to_telegram import TelegramError, call_api  # noqa: E402
 
 BASE = Path(__file__).resolve().parent
 CONFIG_PATH = BASE / "config.json"
+DEFAULTS_PATH = BASE / "config.defaults.json"
 
 
 def ask(prompt):
@@ -191,8 +192,22 @@ def send_test(cfg, where):
     print("  A test message was just sent there - check it.")
 
 
+def load_config():
+    """Existing settings win; anything new in this build is filled in around them."""
+    defaults = json.loads(DEFAULTS_PATH.read_text()) if DEFAULTS_PATH.exists() else {}
+    existing = json.loads(CONFIG_PATH.read_text()) if CONFIG_PATH.exists() else {}
+
+    cfg = {**defaults, **existing}
+    added = [k for k in defaults if k not in existing]
+    if added:
+        print(f"  Added new settings: {', '.join(added)}")
+    if cfg != existing:
+        CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    return cfg
+
+
 def main():
-    cfg = json.loads(CONFIG_PATH.read_text())
+    cfg = load_config()
     setup_mailbox(cfg)
     bot = setup_bot(cfg)
     where = setup_chat(cfg, bot)
