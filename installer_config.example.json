@@ -3,10 +3,6 @@
   "imap_port": 993,
   "email": "you@yourdomain.com",
 
-  "telegram_api_id": 12345678,
-  "telegram_api_hash": "your-api-hash-from-my.telegram.org",
-  "telegram_phone": "+491234567890",
-
   "watch_senders": [
     "sender@example.com"
   ],

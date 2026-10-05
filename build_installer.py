@@ -16,13 +16,13 @@ BASE = Path(__file__).resolve().parent
 SETTINGS = BASE / "installer_config.json"
 OUT = BASE / "Setup Email Forwarder.command"
 
-REQUIRED = ["imap_server", "email", "telegram_api_id", "telegram_api_hash",
-            "telegram_phone", "watch_senders"]
+REQUIRED = ["imap_server", "email", "watch_senders"]
 
 DEFAULTS = {
     "imap_port": 993,
-    "password": "",          # asked for during setup, never stored here
-    "telegram_chat_id": "",  # chosen during setup
+    "password": "",             # asked for during setup
+    "telegram_bot_token": "",   # asked for during setup
+    "telegram_chat_id": "",     # chosen during setup
     "mode": "idle",
     "dashboard_port": 9876,
 }
@@ -48,6 +48,7 @@ def main():
 
     config = {**DEFAULTS, **settings}
     config["password"] = ""
+    config["telegram_bot_token"] = ""
     config["telegram_chat_id"] = ""
 
     template = (BASE / "setup_template.sh").read_text()
