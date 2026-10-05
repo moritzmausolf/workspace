@@ -1,172 +1,255 @@
 #!/usr/bin/env python3
 """
-Email-to-Telegram Forwarder
-Monitors a Hostinger IMAP mailbox and forwards emails from specific senders
-to a Telegram chat using your personal Telegram account (via Telethon).
+Email-to-Telegram Forwarder.
 
-Toggle on/off via the built-in web dashboard at http://localhost:9876
+Watches an IMAP mailbox and forwards mail from configured senders into a
+Telegram chat, sent from the user's own account via Telethon.
 
-First run: you'll be prompted for your phone number and a login code.
-After that, the session is saved and no further login is needed.
+Dashboard (pause/resume) at http://localhost:<dashboard_port>.
 """
 
-import imaplib
-import email
-from email.header import decode_header
-import time
-import json
-import threading
-import signal
-import sys
-import os
-import socket
-from pathlib import Path
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from datetime import datetime
 import asyncio
+import email
+import email.utils
+import html
+import imaplib
+import json
+import signal
+import socket
+import sys
+import threading
+import time
+from datetime import datetime
+from email.header import decode_header
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
-STATE_PATH = Path(__file__).parent / ".forwarder_state.json"
-SESSION_PATH = Path(__file__).parent / "telegram_session"
+from telethon import TelegramClient
 
-# ---------------------------------------------------------------------------
-# Config
-# ---------------------------------------------------------------------------
+BASE = Path(__file__).resolve().parent
+CONFIG_PATH = BASE / "config.json"
+STATE_PATH = BASE / "state.json"
+SESSION_PATH = BASE / "telegram_session"
+
+TELEGRAM_LIMIT = 4096
+BODY_LIMIT = 3000
+IDLE_SECONDS = 240
+
+
+def now():
+    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+def log(msg):
+    print(f"[{now()}] {msg}", flush=True)
+
+
+# --------------------------------------------------------------------------
+# config + state
+# --------------------------------------------------------------------------
 
 def load_config():
     if not CONFIG_PATH.exists():
-        print(f"ERROR: {CONFIG_PATH} not found. Copy config.example.json and fill in your details.")
+        log(f"ERROR: {CONFIG_PATH} not found.")
         sys.exit(1)
     with open(CONFIG_PATH) as f:
         return json.load(f)
 
-# ---------------------------------------------------------------------------
-# State (on/off toggle persisted to disk)
-# ---------------------------------------------------------------------------
+
+_state_lock = threading.Lock()
+
+
+def _default_state():
+    return {"enabled": True, "last_check": None, "forwarded_count": 0, "seen_uids": []}
+
 
 def load_state():
     if STATE_PATH.exists():
-        with open(STATE_PATH) as f:
-            return json.load(f)
-    return {"enabled": True, "last_check": None, "forwarded_count": 0}
+        try:
+            with open(STATE_PATH) as f:
+                s = _default_state()
+                s.update(json.load(f))
+                return s
+        except (OSError, ValueError):
+            pass
+    return _default_state()
 
-def save_state(state):
-    with open(STATE_PATH, "w") as f:
-        json.dump(state, f, indent=2)
 
 state = load_state()
-state_lock = threading.Lock()
+# Keep the on-disk UID list bounded; IMAP UIDs only ever increase.
+seen_uids = set(state.get("seen_uids", []))
 
-# ---------------------------------------------------------------------------
-# Telegram (Telethon — sends as YOUR account)
-# ---------------------------------------------------------------------------
 
-telegram_client = None
-telegram_loop = None
+def save_state():
+    state["seen_uids"] = sorted(seen_uids)[-500:]
+    tmp = STATE_PATH.with_suffix(".tmp")
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2)
+    tmp.replace(STATE_PATH)
 
-async def init_telegram(cfg):
-    from telethon import TelegramClient
-    global telegram_client, telegram_loop
 
-    session_file = str(SESSION_PATH)
-    client = TelegramClient(
-        session_file,
-        cfg["telegram_api_id"],
-        cfg["telegram_api_hash"],
-    )
-    await client.start(phone=cfg.get("telegram_phone"))
-    me = await client.get_me()
-    print(f"[{now()}] Logged into Telegram as {me.first_name} ({me.phone})")
-    telegram_client = client
-    telegram_loop = asyncio.get_event_loop()
-    return client
+# --------------------------------------------------------------------------
+# telegram
+# --------------------------------------------------------------------------
 
-async def send_telegram_message(chat_id, text):
-    global telegram_client
-    if not telegram_client:
-        return None
-    try:
-        entity = await telegram_client.get_entity(int(chat_id))
-        result = await telegram_client.send_message(entity, text, parse_mode="html")
-        return result
-    except Exception as e:
-        print(f"[{now()}] Telegram send error: {e}")
-        return None
+class Telegram:
+    """Owns a Telethon client on its own event loop in a background thread."""
 
-def send_telegram(chat_id, text):
-    if telegram_loop and telegram_client:
-        future = asyncio.run_coroutine_threadsafe(
-            send_telegram_message(chat_id, text),
-            telegram_loop,
-        )
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.loop = None
+        self.client = None
+        self.entity = None
+        self.ready = threading.Event()
+        self.error = None
+
+    def start(self):
+        threading.Thread(target=self._run, daemon=True).start()
+        if not self.ready.wait(timeout=90):
+            raise RuntimeError("Telegram client did not become ready in time")
+        if self.error:
+            raise self.error
+
+    def _run(self):
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self.loop = loop
         try:
-            return future.result(timeout=15)
-        except Exception as e:
-            print(f"[{now()}] Telegram send error: {e}")
-            return None
-    return None
+            loop.run_until_complete(self._connect())
+        except Exception as exc:  # surfaced to start()
+            self.error = exc
+            self.ready.set()
+            return
+        self.ready.set()
+        loop.run_forever()
 
-# ---------------------------------------------------------------------------
-# Email parsing
-# ---------------------------------------------------------------------------
+    async def _connect(self):
+        self.client = TelegramClient(
+            str(SESSION_PATH),
+            self.cfg["telegram_api_id"],
+            self.cfg["telegram_api_hash"],
+        )
+        await self.client.connect()
+        if not await self.client.is_user_authorized():
+            raise RuntimeError(
+                "Telegram session is not authorized. Re-run the setup to log in."
+            )
+        me = await self.client.get_me()
+        log(f"Telegram: logged in as {me.first_name}")
+        self.entity = await self._resolve_chat()
+        log(f"Telegram: target chat resolved -> {self._describe(self.entity)}")
+
+    async def _resolve_chat(self):
+        raw = str(self.cfg["telegram_chat_id"]).strip()
+        try:
+            return await self.client.get_entity(int(raw))
+        except (ValueError, TypeError):
+            pass
+        except Exception:
+            pass
+        # Fall back to scanning dialogs, which also warms the entity cache.
+        async for dialog in self.client.iter_dialogs():
+            if str(dialog.id) == raw or dialog.name == raw:
+                return dialog.entity
+        return await self.client.get_entity(raw)
+
+    @staticmethod
+    def _describe(entity):
+        for attr in ("title", "username", "first_name"):
+            value = getattr(entity, attr, None)
+            if value:
+                return value
+        return str(getattr(entity, "id", entity))
+
+    def send(self, text):
+        future = asyncio.run_coroutine_threadsafe(self._send(text), self.loop)
+        return future.result(timeout=60)
+
+    async def _send(self, text):
+        await self.client.send_message(self.entity, text, parse_mode="html")
+        return True
+
+
+# --------------------------------------------------------------------------
+# email formatting
+# --------------------------------------------------------------------------
 
 def decode_mime_header(raw):
-    parts = decode_header(raw or "")
-    decoded = []
-    for part, charset in parts:
+    out = []
+    for part, charset in decode_header(raw or ""):
         if isinstance(part, bytes):
-            decoded.append(part.decode(charset or "utf-8", errors="replace"))
+            out.append(part.decode(charset or "utf-8", errors="replace"))
         else:
-            decoded.append(part)
-    return " ".join(decoded)
+            out.append(part)
+    return "".join(out).strip()
+
+
+def _strip_html(raw):
+    import re
+
+    raw = re.sub(r"(?is)<(script|style).*?</\1>", " ", raw)
+    raw = re.sub(r"(?i)<br\s*/?>", "\n", raw)
+    raw = re.sub(r"(?i)</p\s*>", "\n\n", raw)
+    raw = re.sub(r"(?s)<[^>]+>", " ", raw)
+    raw = html.unescape(raw)
+    raw = re.sub(r"[ \t]+", " ", raw)
+    raw = "\n".join(line.strip() for line in raw.splitlines())
+    raw = re.sub(r"\n{3,}", "\n\n", raw)
+    return raw.strip()
+
 
 def extract_body(msg):
-    body = ""
+    plain = ""
+    rich = ""
     if msg.is_multipart():
         for part in msg.walk():
-            ct = part.get_content_type()
-            if ct == "text/plain":
-                payload = part.get_payload(decode=True)
-                if payload:
-                    charset = part.get_content_charset() or "utf-8"
-                    body = payload.decode(charset, errors="replace")
-                    break
-            elif ct == "text/html" and not body:
-                payload = part.get_payload(decode=True)
-                if payload:
-                    charset = part.get_content_charset() or "utf-8"
-                    body = payload.decode(charset, errors="replace")
+            if part.get_content_maintype() == "multipart":
+                continue
+            if part.get_filename():
+                continue
+            payload = part.get_payload(decode=True)
+            if not payload:
+                continue
+            charset = part.get_content_charset() or "utf-8"
+            text = payload.decode(charset, errors="replace")
+            if part.get_content_type() == "text/plain" and not plain:
+                plain = text
+            elif part.get_content_type() == "text/html" and not rich:
+                rich = text
     else:
         payload = msg.get_payload(decode=True)
         if payload:
             charset = msg.get_content_charset() or "utf-8"
-            body = payload.decode(charset, errors="replace")
-    if len(body) > 3500:
-        body = body[:3500] + "\n\n... [truncated]"
+            text = payload.decode(charset, errors="replace")
+            if msg.get_content_type() == "text/html":
+                rich = text
+            else:
+                plain = text
+
+    body = plain.strip() or _strip_html(rich)
+    if len(body) > BODY_LIMIT:
+        body = body[:BODY_LIMIT].rstrip() + "\n\n[...truncated]"
     return body.strip()
 
-def format_for_telegram(msg):
+
+def format_message(msg):
     sender = decode_mime_header(msg.get("From", "Unknown"))
     subject = decode_mime_header(msg.get("Subject", "(no subject)"))
-    date = msg.get("Date", "")
     body = extract_body(msg)
 
-    import html
     text = (
-        f"\U0001f4e7 <b>New Email</b>\n"
-        f"<b>From:</b> {html.escape(sender)}\n"
-        f"<b>Subject:</b> {html.escape(subject)}\n"
-        f"<b>Date:</b> {html.escape(date)}\n"
-        f"\n{html.escape(body)}"
+        f"<b>{html.escape(subject)}</b>\n"
+        f"<i>from {html.escape(sender)}</i>\n\n"
+        f"{html.escape(body)}"
     )
+    if len(text) > TELEGRAM_LIMIT:
+        text = text[: TELEGRAM_LIMIT - 20].rstrip() + "\n[...truncated]"
     return text
 
-# ---------------------------------------------------------------------------
-# IMAP watcher
-# ---------------------------------------------------------------------------
 
-def now():
-    return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+# --------------------------------------------------------------------------
+# imap
+# --------------------------------------------------------------------------
 
 def connect_imap(cfg):
     mail = imaplib.IMAP4_SSL(cfg["imap_server"], cfg.get("imap_port", 993))
@@ -174,286 +257,237 @@ def connect_imap(cfg):
     mail.select("INBOX")
     return mail
 
-def check_new_emails(mail, cfg, seen_uids):
-    global state
-    with state_lock:
-        if not state["enabled"]:
-            return seen_uids
 
-    senders = [s.lower() for s in cfg["watch_senders"]]
-    _, data = mail.uid("search", None, "UNSEEN")
-    uids = data[0].split()
+def matches(sender_addr, watch):
+    return any(w == sender_addr or w in sender_addr for w in watch)
 
-    for uid in uids:
+
+def check_mailbox(mail, cfg, telegram):
+    """Forward any unseen mail from a watched sender. Returns True if work was done."""
+    watch = [s.lower().strip() for s in cfg["watch_senders"]]
+
+    typ, data = mail.uid("search", None, "UNSEEN")
+    if typ != "OK" or not data or not data[0]:
+        return False
+
+    did_work = False
+    for uid in data[0].split():
         uid_str = uid.decode()
         if uid_str in seen_uids:
             continue
 
-        _, msg_data = mail.uid("fetch", uid, "(RFC822)")
-        if not msg_data or not msg_data[0]:
+        typ, payload = mail.uid("fetch", uid, "(BODY.PEEK[])")
+        if typ != "OK" or not payload or not isinstance(payload[0], tuple):
             continue
 
-        raw = msg_data[0][1]
-        msg = email.message_from_bytes(raw)
+        msg = email.message_from_bytes(payload[0][1])
         sender_addr = email.utils.parseaddr(msg.get("From", ""))[1].lower()
 
-        if sender_addr in senders or any(s in sender_addr for s in senders):
-            subject = decode_mime_header(msg.get("Subject", ""))
-            print(f"[{now()}] Forwarding email from {sender_addr}: {subject}")
-            text = format_for_telegram(msg)
-            result = send_telegram(cfg["telegram_chat_id"], text)
-            if result:
-                print(f"[{now()}] Sent to Telegram")
-                with state_lock:
-                    state["forwarded_count"] = state.get("forwarded_count", 0) + 1
-                    state["last_check"] = now()
-                    save_state(state)
-            else:
-                print(f"[{now()}] Telegram send failed")
+        if not matches(sender_addr, watch):
+            seen_uids.add(uid_str)
+            continue
+
+        with _state_lock:
+            enabled = state["enabled"]
+
+        if not enabled:
+            # Paused: swallow it so resuming doesn't replay a backlog.
+            seen_uids.add(uid_str)
+            log(f"Paused - skipping mail from {sender_addr}")
+            did_work = True
+            continue
+
+        subject = decode_mime_header(msg.get("Subject", ""))
+        log(f"Forwarding from {sender_addr}: {subject}")
+        try:
+            telegram.send(format_message(msg))
+        except Exception as exc:
+            log(f"Telegram send failed ({exc}) - will retry on next pass")
+            continue
 
         seen_uids.add(uid_str)
+        with _state_lock:
+            state["forwarded_count"] += 1
+        log("Sent to Telegram")
+        did_work = True
 
-    return seen_uids
+    if did_work:
+        with _state_lock:
+            save_state()
+    return did_work
 
-def imap_idle_loop(cfg):
-    seen_uids = set()
-    while True:
+
+def idle_wait(mail, seconds):
+    """Block until the server reports new mail, or until the timeout elapses."""
+    tag = mail._new_tag().decode()
+    mail.send(f"{tag} IDLE\r\n".encode())
+    mail.readline()  # '+ idling'
+    old_timeout = mail.sock.gettimeout()
+    mail.sock.settimeout(seconds)
+    try:
+        while True:
+            line = mail.readline().decode(errors="replace")
+            if not line:
+                raise imaplib.IMAP4.abort("connection closed during IDLE")
+            if "EXISTS" in line or "RECENT" in line or line.startswith(tag):
+                break
+    except (socket.timeout, TimeoutError):
+        pass
+    finally:
+        mail.sock.settimeout(old_timeout)
         try:
-            print(f"[{now()}] Connecting to {cfg['imap_server']}...")
-            mail = connect_imap(cfg)
-            print(f"[{now()}] Connected. Starting IDLE watch...")
+            mail.send(b"DONE\r\n")
+            mail.readline()
+        except Exception:
+            pass
 
-            seen_uids = check_new_emails(mail, cfg, seen_uids)
+
+def watch_mailbox(cfg, telegram):
+    use_idle = cfg.get("mode", "idle") != "poll"
+    while True:
+        mail = None
+        try:
+            log(f"Connecting to {cfg['imap_server']} ...")
+            mail = connect_imap(cfg)
+            has_idle = use_idle and b"IDLE" in (mail.capabilities and b" ".join(
+                c.encode() if isinstance(c, str) else c for c in mail.capabilities))
+            log("Connected. Mode: " + ("IDLE (instant)" if has_idle else "polling (15s)"))
+
+            check_mailbox(mail, cfg, telegram)
+            with _state_lock:
+                state["last_check"] = now()
+                save_state()
 
             while True:
-                with state_lock:
-                    state["last_check"] = now()
-                    save_state(state)
-
-                try:
-                    tag = mail._new_tag().decode()
-                    mail.send(f"{tag} IDLE\r\n".encode())
-                    resp = mail.readline()
-
-                    mail.sock.settimeout(240)
-                    try:
-                        while True:
-                            line = mail.readline().decode(errors="replace")
-                            if "EXISTS" in line or "RECENT" in line:
-                                break
-                            if line.startswith(tag):
-                                break
-                    except (socket.timeout, OSError):
-                        pass
-
-                    mail.send(b"DONE\r\n")
-                    try:
-                        mail.readline()
-                    except Exception:
-                        pass
-
-                    mail.noop()
-                    seen_uids = check_new_emails(mail, cfg, seen_uids)
-
-                except (imaplib.IMAP4.abort, imaplib.IMAP4.error, OSError) as e:
-                    print(f"[{now()}] IDLE error: {e}. Reconnecting in 5s...")
-                    time.sleep(5)
-                    break
-
-        except Exception as e:
-            print(f"[{now()}] Connection error: {e}. Retrying in 10s...")
-            time.sleep(10)
-
-def polling_loop(cfg):
-    seen_uids = set()
-    while True:
-        try:
-            mail = connect_imap(cfg)
-            print(f"[{now()}] Connected (polling mode). Checking every 15s...")
-            while True:
-                with state_lock:
-                    if state["enabled"]:
-                        seen_uids = check_new_emails(mail, cfg, seen_uids)
-                    state["last_check"] = now()
-                    save_state(state)
-                time.sleep(15)
+                if has_idle:
+                    idle_wait(mail, IDLE_SECONDS)
+                else:
+                    time.sleep(15)
                 mail.noop()
-        except Exception as e:
-            print(f"[{now()}] Error: {e}. Reconnecting in 10s...")
+                check_mailbox(mail, cfg, telegram)
+                with _state_lock:
+                    state["last_check"] = now()
+                    save_state()
+
+        except Exception as exc:
+            log(f"Mailbox error: {exc} - reconnecting in 10s")
             time.sleep(10)
+        finally:
+            if mail is not None:
+                try:
+                    mail.logout()
+                except Exception:
+                    pass
 
-# ---------------------------------------------------------------------------
-# Web dashboard (toggle on/off)
-# ---------------------------------------------------------------------------
 
-DASHBOARD_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+# --------------------------------------------------------------------------
+# dashboard
+# --------------------------------------------------------------------------
+
+PAGE = """<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Email Forwarder</title>
 <style>
-  :root {
-    --bg: #0f0f0f; --fg: #e8e8e8; --card: #1a1a1a; --accent: #4ade80;
-    --accent-off: #f87171; --border: #333;
-  }
-  * { margin: 0; padding: 0; box-sizing: border-box; }
-  body {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-    background: var(--bg); color: var(--fg);
-    display: flex; justify-content: center; align-items: center;
-    min-height: 100vh; padding: 16px;
-  }
-  .card {
-    background: var(--card); border: 1px solid var(--border);
-    border-radius: 16px; padding: 32px; max-width: 380px; width: 100%;
-    text-align: center;
-  }
-  h1 { font-size: 20px; margin-bottom: 8px; }
-  .status { font-size: 14px; color: #888; margin-bottom: 24px; }
-  .toggle-btn {
-    width: 100%; padding: 16px; border: none; border-radius: 12px;
-    font-size: 18px; font-weight: 600; cursor: pointer;
-    transition: all 0.2s;
-  }
-  .toggle-btn.on {
-    background: var(--accent-off); color: #1a1a1a;
-  }
-  .toggle-btn.off {
-    background: var(--accent); color: #1a1a1a;
-  }
-  .toggle-btn:hover { opacity: 0.85; transform: scale(0.98); }
-  .indicator {
-    display: inline-block; width: 12px; height: 12px; border-radius: 50%;
-    margin-right: 8px; vertical-align: middle;
-  }
-  .indicator.on { background: var(--accent); box-shadow: 0 0 8px var(--accent); }
-  .indicator.off { background: var(--accent-off); box-shadow: 0 0 8px var(--accent-off); }
-  .stats { margin-top: 20px; font-size: 13px; color: #666; }
-</style>
-</head>
-<body>
+:root{--bg:#fafafa;--fg:#18181b;--muted:#71717a;--card:#fff;--line:#e4e4e7;
+--on:#16a34a;--off:#dc2626}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){
+--bg:#09090b;--fg:#fafafa;--muted:#a1a1aa;--card:#18181b;--line:#27272a;
+--on:#4ade80;--off:#f87171}}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font:16px/1.5 -apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;
+background:var(--bg);color:var(--fg);min-height:100vh;
+display:flex;align-items:center;justify-content:center;padding:16px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;
+padding:28px;width:100%;max-width:360px;text-align:center}
+h1{font-size:15px;font-weight:600;letter-spacing:.01em;margin-bottom:18px;color:var(--muted)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:7px;
+vertical-align:middle;background:var(--STATE)}
+.state{font-size:22px;font-weight:600;margin-bottom:22px}
+button{width:100%;padding:14px;border:0;border-radius:11px;font-size:16px;
+font-weight:600;cursor:pointer;background:var(--BTN);color:#fff;font-family:inherit}
+button:active{transform:scale(.985)}
+.meta{margin-top:18px;font-size:13px;color:var(--muted);line-height:1.7}
+</style></head><body>
 <div class="card">
-  <h1>Email Forwarder</h1>
-  <p class="status">
-    <span class="indicator {{STATE_CLASS}}"></span>
-    {{STATE_TEXT}}
-  </p>
-  <button class="toggle-btn {{BTN_CLASS}}" onclick="toggle()">
-    {{BTN_TEXT}}
-  </button>
-  <div class="stats">
-    Emails forwarded: {{COUNT}}<br>
-    Last check: {{LAST_CHECK}}
-  </div>
+  <h1>EMAIL &rarr; TELEGRAM</h1>
+  <div class="state"><span class="dot"></span>__STATE__</div>
+  <button onclick="t()">__BTN__</button>
+  <div class="meta">__COUNT__ forwarded<br>last checked __LAST__</div>
 </div>
 <script>
-async function toggle() {
-  const res = await fetch('/toggle', { method: 'POST' });
-  if (res.ok) location.reload();
-}
-</script>
-</body>
-</html>"""
+async function t(){await fetch('/toggle',{method:'POST'});location.reload()}
+setTimeout(()=>location.reload(),30000);
+</script></body></html>"""
 
-class DashboardHandler(BaseHTTPRequestHandler):
-    def log_message(self, format, *args):
+
+class Dashboard(BaseHTTPRequestHandler):
+    def log_message(self, *args):
         pass
 
     def do_GET(self):
-        with state_lock:
+        with _state_lock:
             enabled = state["enabled"]
-            count = state.get("forwarded_count", 0)
-            last = state.get("last_check", "never")
+            count = state["forwarded_count"]
+            last = state["last_check"] or "never"
 
-        page = DASHBOARD_HTML
-        page = page.replace("{{STATE_CLASS}}", "on" if enabled else "off")
-        page = page.replace("{{STATE_TEXT}}", "Running" if enabled else "Paused")
-        page = page.replace("{{BTN_CLASS}}", "on" if enabled else "off")
-        page = page.replace("{{BTN_TEXT}}", "Pause Forwarder" if enabled else "Start Forwarder")
-        page = page.replace("{{COUNT}}", str(count))
-        page = page.replace("{{LAST_CHECK}}", last)
-
+        page = (PAGE
+                .replace("var(--STATE)", "var(--on)" if enabled else "var(--off)")
+                .replace("var(--BTN)", "var(--off)" if enabled else "var(--on)")
+                .replace("__STATE__", "Running" if enabled else "Paused")
+                .replace("__BTN__", "Pause" if enabled else "Resume")
+                .replace("__COUNT__", str(count))
+                .replace("__LAST__", last))
+        body = page.encode()
         self.send_response(200)
-        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(page.encode())
+        self.wfile.write(body)
 
     def do_POST(self):
-        if self.path == "/toggle":
-            with state_lock:
-                state["enabled"] = not state["enabled"]
-                save_state(state)
-                status = "enabled" if state["enabled"] else "paused"
-                print(f"[{now()}] Forwarder {status} via dashboard")
-            self.send_response(200)
-            self.end_headers()
-            self.wfile.write(b"ok")
-        else:
+        if self.path != "/toggle":
             self.send_response(404)
             self.end_headers()
+            return
+        with _state_lock:
+            state["enabled"] = not state["enabled"]
+            save_state()
+            log("Forwarder " + ("resumed" if state["enabled"] else "paused"))
+        self.send_response(204)
+        self.end_headers()
 
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+
+# --------------------------------------------------------------------------
 
 def main():
     cfg = load_config()
+    required = ["imap_server", "email", "password", "telegram_api_id",
+                "telegram_api_hash", "telegram_chat_id", "watch_senders"]
+    missing = [k for k in required if not cfg.get(k)]
+    if missing:
+        log(f"ERROR: config.json is missing: {', '.join(missing)}")
+        sys.exit(1)
 
-    required = ["imap_server", "email", "password", "telegram_api_id", "telegram_api_hash", "telegram_chat_id", "watch_senders"]
-    for key in required:
-        if key not in cfg or not cfg[key]:
-            print(f"ERROR: '{key}' is missing or empty in config.json")
-            sys.exit(1)
+    telegram = Telegram(cfg)
+    telegram.start()
 
     port = cfg.get("dashboard_port", 9876)
+    server = HTTPServer(("127.0.0.1", port), Dashboard)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    log(f"Dashboard: http://localhost:{port}")
+    log("Watching for mail from: " + ", ".join(cfg["watch_senders"]))
 
-    # Start Telegram client in its own thread with its own event loop
-    def run_telegram():
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(init_telegram(cfg))
-        global telegram_loop
-        telegram_loop = loop
-        loop.run_forever()
-
-    tg_thread = threading.Thread(target=run_telegram, daemon=True)
-    tg_thread.start()
-    time.sleep(3)  # wait for Telegram login
-
-    # Start web dashboard
-    server = HTTPServer(("127.0.0.1", port), DashboardHandler)
-    dash_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    dash_thread.start()
-    print(f"[{now()}] Dashboard running at http://localhost:{port}")
-    print(f"[{now()}] Watching for emails from: {', '.join(cfg['watch_senders'])}")
-
-    def shutdown(sig, frame):
-        print(f"\n[{now()}] Shutting down...")
+    def stop(_sig, _frame):
+        log("Shutting down")
         server.shutdown()
-        if telegram_client:
-            asyncio.run_coroutine_threadsafe(telegram_client.disconnect(), telegram_loop)
         sys.exit(0)
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
 
-    mode = cfg.get("mode", "idle")
-    if mode == "poll":
-        polling_loop(cfg)
-    else:
-        try:
-            imap_idle_loop(cfg)
-        except Exception as e:
-            print(f"[{now()}] IDLE failed ({e}), falling back to polling...")
-            polling_loop(cfg)
+    signal.signal(signal.SIGINT, stop)
+    signal.signal(signal.SIGTERM, stop)
+
+    watch_mailbox(cfg, telegram)
+
 
 if __name__ == "__main__":
-    if "--login-only" in sys.argv:
-        cfg = load_config()
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(init_telegram(cfg))
-        print("Telegram login successful! Session saved.")
-        loop.run_until_complete(telegram_client.disconnect())
-    else:
-        main()
+    main()

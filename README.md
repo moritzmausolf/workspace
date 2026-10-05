@@ -1,69 +1,64 @@
-# Email-to-Telegram Forwarder
+# Email → Telegram forwarder
 
-Monitors your Hostinger email and instantly forwards emails from specific senders to a Telegram chat — sent as **you**, not a bot.
+Watches a mailbox over IMAP and forwards mail from chosen senders into a
+Telegram chat, sent from your own Telegram account rather than a bot.
 
-## Features
+- **Instant** — uses IMAP IDLE, so the server pushes as mail arrives
+- **From your account** — Telethon, not the Bot API
+- **One-click pause** — a small page at `http://localhost:9876`
+- **Always on** — a launchd agent that starts at login
 
-- **Near-instant** — uses IMAP IDLE (push notifications), no polling delay
-- **Sends as your account** — messages appear from you in the chat (via Telethon)
-- **One-click on/off** — web dashboard at `http://localhost:9876` (bookmark in Arc)
-- **Runs in background** — installs as a macOS service, survives reboots
+## Install
 
-## Setup
+Run `python3 build_installer.py` to produce **`Setup Email Forwarder.command`**,
+then double-click that file in Finder on the target Mac. Terminal opens and the
+installer asks for two things: the mailbox password, and the Telegram login code.
+It then lists your chats so you can pick the destination by number, sends a test
+message, and starts the background service.
 
-### 1. Get Telegram API credentials
+Everything lands in `~/EmailForwarder`.
 
-1. Go to https://my.telegram.org/apps
-2. Log in with your phone number
-3. Create an app (name doesn't matter — e.g. "Email Forwarder")
-4. Copy the **api_id** and **api_hash**
+## Configuring the build
 
-### 2. Find the target chat ID
-
-The easiest way:
-1. Open Telegram Web (https://web.telegram.org)
-2. Open the chat you want to forward emails to
-3. Look at the URL — the number after `#` is the chat ID
-   - For groups it looks like `-1001234567890`
-   - For a private chat with someone, it's their user ID
-
-Or: run `python3 get_chat_id.py` after step 3 below (it lists your recent chats).
-
-### 3. Configure
+`build_installer.py` reads `installer_config.json` (gitignored, since it holds
+personal values). Start from the example:
 
 ```bash
-cp config.example.json config.json
+cp installer_config.example.json installer_config.json
 ```
 
-Edit `config.json`:
+| Field | Meaning |
+|---|---|
+| `imap_server`, `imap_port` | Mail server, e.g. `imap.hostinger.com` / `993` |
+| `email` | Mailbox to watch |
+| `telegram_api_id`, `telegram_api_hash` | From https://my.telegram.org/apps |
+| `telegram_phone` | Your number, with country code |
+| `watch_senders` | Addresses to forward; substring match |
+| `mode` | `idle` (instant) or `poll` (every 15s) |
+| `dashboard_port` | Port for the pause page |
 
-| Field | Value |
-|-------|-------|
-| `email` | Your Hostinger email address |
-| `password` | Your Hostinger email password |
-| `telegram_api_id` | From step 1 (a number) |
-| `telegram_api_hash` | From step 1 (a hex string) |
-| `telegram_phone` | Your phone number with country code, e.g. `+491234567890` |
-| `telegram_chat_id` | From step 2 |
-| `watch_senders` | List of sender email addresses to forward |
+The mailbox password and the destination chat are **not** in this file — the
+installer asks for the password and verifies it against the server, and the chat
+is picked from a list during setup.
 
-### 4. Install
+## Running it
 
-```bash
-bash install_mac.sh
-```
+| | |
+|---|---|
+| Pause / resume | `http://localhost:9876` |
+| Log | `~/EmailForwarder/forwarder.log` |
+| Stop | `launchctl bootout gui/$(id -u)/com.moritz.emailforwarder` |
+| Start | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.moritz.emailforwarder.plist` |
+| Remove | stop it, then delete `~/EmailForwarder` and the plist |
 
-On first run, Telegram sends a login code to your phone — enter it in the terminal. After that, the session is saved and no further login is needed.
+Pausing drops matching mail rather than queuing it, so resuming does not replay
+a backlog.
 
-### 5. Bookmark the dashboard
+## Layout
 
-Open `http://localhost:9876` in Arc and bookmark it.
-Click the bookmark anytime to pause/resume.
-
-## Usage
-
-- **Toggle on/off**: Visit `http://localhost:9876`
-- **View logs**: `tail -f forwarder.log`
-- **Stop**: `launchctl unload ~/Library/LaunchAgents/com.email-forwarder.plist`
-- **Start**: `launchctl load ~/Library/LaunchAgents/com.email-forwarder.plist`
-- **Uninstall**: `launchctl unload ~/Library/LaunchAgents/com.email-forwarder.plist && rm ~/Library/LaunchAgents/com.email-forwarder.plist`
+| File | Role |
+|---|---|
+| `email_to_telegram.py` | The forwarder: IMAP watcher, Telegram client, pause page |
+| `setup_helper.py` | Interactive setup: password check, Telegram sign-in, chat picker |
+| `setup_template.sh` | Installer shell, with placeholders for the above |
+| `build_installer.py` | Fills the template to produce the `.command` file |

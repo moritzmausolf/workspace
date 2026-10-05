@@ -1,6 +1,15 @@
+# personal values and built artifacts
+installer_config.json
+Setup Email Forwarder.command
+
+# runtime
 config.json
-.forwarder_state.json
+state.json
+state.tmp
 forwarder.log
-__pycache__/
 telegram_session.session
+.login_pending.json
+
+# python
 .venv/
+__pycache__/

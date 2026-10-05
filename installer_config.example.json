@@ -2,12 +2,10 @@
   "imap_server": "imap.hostinger.com",
   "imap_port": 993,
   "email": "you@yourdomain.com",
-  "password": "your-email-password",
 
   "telegram_api_id": 12345678,
-  "telegram_api_hash": "abcdef1234567890abcdef1234567890",
+  "telegram_api_hash": "your-api-hash-from-my.telegram.org",
   "telegram_phone": "+491234567890",
-  "telegram_chat_id": "-1001234567890",
 
   "watch_senders": [
     "sender@example.com"
