@@ -13,3 +13,4 @@ telegram_session.session
 # python
 .venv/
 __pycache__/
+EmailForwarderSetup.zip
