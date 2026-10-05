@@ -12,6 +12,10 @@ PYTHON="$(which python3)"
 echo "📧 → 💬 Email-to-Telegram Forwarder Installer"
 echo "================================================"
 
+# Install Telethon
+echo "Installing Telethon..."
+pip3 install telethon --quiet
+
 # Check config exists
 if [ ! -f "$SCRIPT_DIR/config.json" ]; then
     echo ""
@@ -52,12 +56,18 @@ cat > "$PLIST_PATH" << EOF
 </plist>
 EOF
 
+# First run — must be interactive so you can enter the Telegram login code
+echo ""
+echo "First run: logging into Telegram (you'll get a code on your phone)..."
+echo ""
+$PYTHON "$SCRIPT_DIR/email_to_telegram.py" --login-only 2>&1 || true
+
 # Load the service
 launchctl unload "$PLIST_PATH" 2>/dev/null || true
 launchctl load "$PLIST_PATH"
 
 echo ""
-echo "✅ Forwarder installed and running!"
+echo "Forwarder installed and running!"
 echo ""
 echo "   Dashboard:  http://localhost:9876"
 echo "   Logs:       $SCRIPT_DIR/forwarder.log"

@@ -2,3 +2,4 @@ config.json
 .forwarder_state.json
 forwarder.log
 __pycache__/
+telegram_session.session

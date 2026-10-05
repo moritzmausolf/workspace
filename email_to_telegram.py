@@ -2,9 +2,12 @@
 """
 Email-to-Telegram Forwarder
 Monitors a Hostinger IMAP mailbox and forwards emails from specific senders
-to a Telegram chat in near-real-time using IMAP IDLE (push notifications).
+to a Telegram chat using your personal Telegram account (via Telethon).
 
 Toggle on/off via the built-in web dashboard at http://localhost:9876
+
+First run: you'll be prompted for your phone number and a login code.
+After that, the session is saved and no further login is needed.
 """
 
 import imaplib
@@ -16,16 +19,15 @@ import threading
 import signal
 import sys
 import os
-import html
+import socket
 from pathlib import Path
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from datetime import datetime
-import urllib.request
-import urllib.parse
-import ssl
+import asyncio
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 STATE_PATH = Path(__file__).parent / ".forwarder_state.json"
+SESSION_PATH = Path(__file__).parent / "telegram_session"
 
 # ---------------------------------------------------------------------------
 # Config
@@ -56,25 +58,53 @@ state = load_state()
 state_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
-# Telegram
+# Telegram (Telethon — sends as YOUR account)
 # ---------------------------------------------------------------------------
 
-def send_telegram(bot_token, chat_id, text):
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    data = urllib.parse.urlencode({
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": "true",
-    }).encode()
-    ctx = ssl.create_default_context()
-    req = urllib.request.Request(url, data=data)
+telegram_client = None
+telegram_loop = None
+
+async def init_telegram(cfg):
+    from telethon import TelegramClient
+    global telegram_client, telegram_loop
+
+    session_file = str(SESSION_PATH)
+    client = TelegramClient(
+        session_file,
+        cfg["telegram_api_id"],
+        cfg["telegram_api_hash"],
+    )
+    await client.start(phone=cfg.get("telegram_phone"))
+    me = await client.get_me()
+    print(f"[{now()}] Logged into Telegram as {me.first_name} ({me.phone})")
+    telegram_client = client
+    telegram_loop = asyncio.get_event_loop()
+    return client
+
+async def send_telegram_message(chat_id, text):
+    global telegram_client
+    if not telegram_client:
+        return None
     try:
-        with urllib.request.urlopen(req, context=ctx, timeout=15) as resp:
-            return json.loads(resp.read())
+        entity = await telegram_client.get_entity(int(chat_id))
+        result = await telegram_client.send_message(entity, text, parse_mode="html")
+        return result
     except Exception as e:
         print(f"[{now()}] Telegram send error: {e}")
         return None
+
+def send_telegram(chat_id, text):
+    if telegram_loop and telegram_client:
+        future = asyncio.run_coroutine_threadsafe(
+            send_telegram_message(chat_id, text),
+            telegram_loop,
+        )
+        try:
+            return future.result(timeout=15)
+        except Exception as e:
+            print(f"[{now()}] Telegram send error: {e}")
+            return None
+    return None
 
 # ---------------------------------------------------------------------------
 # Email parsing
@@ -111,7 +141,6 @@ def extract_body(msg):
         if payload:
             charset = msg.get_content_charset() or "utf-8"
             body = payload.decode(charset, errors="replace")
-    # Trim to reasonable length for Telegram (4096 char limit)
     if len(body) > 3500:
         body = body[:3500] + "\n\n... [truncated]"
     return body.strip()
@@ -122,8 +151,9 @@ def format_for_telegram(msg):
     date = msg.get("Date", "")
     body = extract_body(msg)
 
+    import html
     text = (
-        f"📧 <b>New Email</b>\n"
+        f"\U0001f4e7 <b>New Email</b>\n"
         f"<b>From:</b> {html.escape(sender)}\n"
         f"<b>Subject:</b> {html.escape(subject)}\n"
         f"<b>Date:</b> {html.escape(date)}\n"
@@ -171,22 +201,21 @@ def check_new_emails(mail, cfg, seen_uids):
             subject = decode_mime_header(msg.get("Subject", ""))
             print(f"[{now()}] Forwarding email from {sender_addr}: {subject}")
             text = format_for_telegram(msg)
-            result = send_telegram(cfg["telegram_bot_token"], cfg["telegram_chat_id"], text)
-            if result and result.get("ok"):
-                print(f"[{now()}] ✓ Sent to Telegram")
+            result = send_telegram(cfg["telegram_chat_id"], text)
+            if result:
+                print(f"[{now()}] Sent to Telegram")
                 with state_lock:
                     state["forwarded_count"] = state.get("forwarded_count", 0) + 1
                     state["last_check"] = now()
                     save_state(state)
             else:
-                print(f"[{now()}] ✗ Telegram send failed: {result}")
+                print(f"[{now()}] Telegram send failed")
 
         seen_uids.add(uid_str)
 
     return seen_uids
 
 def imap_idle_loop(cfg):
-    """Main loop: connect, IDLE, check, reconnect on failure."""
     seen_uids = set()
     while True:
         try:
@@ -194,7 +223,6 @@ def imap_idle_loop(cfg):
             mail = connect_imap(cfg)
             print(f"[{now()}] Connected. Starting IDLE watch...")
 
-            # Initial check
             seen_uids = check_new_emails(mail, cfg, seen_uids)
 
             while True:
@@ -203,13 +231,10 @@ def imap_idle_loop(cfg):
                     save_state(state)
 
                 try:
-                    # IMAP IDLE — server pushes when new mail arrives
                     tag = mail._new_tag().decode()
                     mail.send(f"{tag} IDLE\r\n".encode())
-                    # Wait for continuation response
                     resp = mail.readline()
 
-                    # Wait up to 4 minutes for IDLE notification (re-IDLE before 29min timeout)
                     mail.sock.settimeout(240)
                     try:
                         while True:
@@ -221,14 +246,12 @@ def imap_idle_loop(cfg):
                     except (socket.timeout, OSError):
                         pass
 
-                    # End IDLE
                     mail.send(b"DONE\r\n")
                     try:
-                        mail.readline()  # tagged response
+                        mail.readline()
                     except Exception:
                         pass
 
-                    # NOOP to keep connection alive and sync state
                     mail.noop()
                     seen_uids = check_new_emails(mail, cfg, seen_uids)
 
@@ -241,14 +264,7 @@ def imap_idle_loop(cfg):
             print(f"[{now()}] Connection error: {e}. Retrying in 10s...")
             time.sleep(10)
 
-import socket  # needed for timeout
-
-# ---------------------------------------------------------------------------
-# Polling fallback (if IDLE is not supported)
-# ---------------------------------------------------------------------------
-
 def polling_loop(cfg):
-    """Fallback: poll every 15 seconds."""
     seen_uids = set()
     while True:
         try:
@@ -318,7 +334,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 </head>
 <body>
 <div class="card">
-  <h1>📧 → 💬 Forwarder</h1>
+  <h1>Email Forwarder</h1>
   <p class="status">
     <span class="indicator {{STATE_CLASS}}"></span>
     {{STATE_TEXT}}
@@ -342,7 +358,7 @@ async function toggle() {
 
 class DashboardHandler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
-        pass  # suppress logs
+        pass
 
     def do_GET(self):
         with state_lock:
@@ -354,7 +370,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
         page = page.replace("{{STATE_CLASS}}", "on" if enabled else "off")
         page = page.replace("{{STATE_TEXT}}", "Running" if enabled else "Paused")
         page = page.replace("{{BTN_CLASS}}", "on" if enabled else "off")
-        page = page.replace("{{BTN_TEXT}}", "⏸ Pause Forwarder" if enabled else "▶ Start Forwarder")
+        page = page.replace("{{BTN_TEXT}}", "Pause Forwarder" if enabled else "Start Forwarder")
         page = page.replace("{{COUNT}}", str(count))
         page = page.replace("{{LAST_CHECK}}", last)
 
@@ -384,14 +400,26 @@ class DashboardHandler(BaseHTTPRequestHandler):
 def main():
     cfg = load_config()
 
-    # Validate config
-    required = ["imap_server", "email", "password", "telegram_bot_token", "telegram_chat_id", "watch_senders"]
+    required = ["imap_server", "email", "password", "telegram_api_id", "telegram_api_hash", "telegram_chat_id", "watch_senders"]
     for key in required:
         if key not in cfg or not cfg[key]:
             print(f"ERROR: '{key}' is missing or empty in config.json")
             sys.exit(1)
 
     port = cfg.get("dashboard_port", 9876)
+
+    # Start Telegram client in its own thread with its own event loop
+    def run_telegram():
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(init_telegram(cfg))
+        global telegram_loop
+        telegram_loop = loop
+        loop.run_forever()
+
+    tg_thread = threading.Thread(target=run_telegram, daemon=True)
+    tg_thread.start()
+    time.sleep(3)  # wait for Telegram login
 
     # Start web dashboard
     server = HTTPServer(("127.0.0.1", port), DashboardHandler)
@@ -400,15 +428,15 @@ def main():
     print(f"[{now()}] Dashboard running at http://localhost:{port}")
     print(f"[{now()}] Watching for emails from: {', '.join(cfg['watch_senders'])}")
 
-    # Graceful shutdown
     def shutdown(sig, frame):
         print(f"\n[{now()}] Shutting down...")
         server.shutdown()
+        if telegram_client:
+            asyncio.run_coroutine_threadsafe(telegram_client.disconnect(), telegram_loop)
         sys.exit(0)
     signal.signal(signal.SIGINT, shutdown)
     signal.signal(signal.SIGTERM, shutdown)
 
-    # Try IDLE first, fall back to polling
     mode = cfg.get("mode", "idle")
     if mode == "poll":
         polling_loop(cfg)
@@ -420,4 +448,12 @@ def main():
             polling_loop(cfg)
 
 if __name__ == "__main__":
-    main()
+    if "--login-only" in sys.argv:
+        cfg = load_config()
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(init_telegram(cfg))
+        print("Telegram login successful! Session saved.")
+        loop.run_until_complete(telegram_client.disconnect())
+    else:
+        main()

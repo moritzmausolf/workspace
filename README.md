@@ -1,59 +1,69 @@
 # Email-to-Telegram Forwarder
 
-Monitors your Hostinger email and instantly forwards emails from specific senders to a Telegram chat.
+Monitors your Hostinger email and instantly forwards emails from specific senders to a Telegram chat — sent as **you**, not a bot.
 
 ## Features
 
 - **Near-instant** — uses IMAP IDLE (push notifications), no polling delay
+- **Sends as your account** — messages appear from you in the chat (via Telethon)
 - **One-click on/off** — web dashboard at `http://localhost:9876` (bookmark in Arc)
 - **Runs in background** — installs as a macOS service, survives reboots
-- **Zero dependencies** — pure Python 3, no pip install needed
 
 ## Setup
 
-### 1. Get your Telegram Bot token and Chat ID
+### 1. Get Telegram API credentials
 
-You already have your bot (`arm64`). To get the chat ID for your target chat:
+1. Go to https://my.telegram.org/apps
+2. Log in with your phone number
+3. Create an app (name doesn't matter — e.g. "Email Forwarder")
+4. Copy the **api_id** and **api_hash**
 
-1. Add the bot to the Telegram chat you want to forward emails to
-2. Send a message in that chat
-3. Open `https://api.telegram.org/bot<YOUR_BOT_TOKEN>/getUpdates` in a browser
-4. Find `"chat":{"id": ...}` — that number is your chat ID (it's negative for groups)
+### 2. Find the target chat ID
 
-### 2. Configure
+The easiest way:
+1. Open Telegram Web (https://web.telegram.org)
+2. Open the chat you want to forward emails to
+3. Look at the URL — the number after `#` is the chat ID
+   - For groups it looks like `-1001234567890`
+   - For a private chat with someone, it's their user ID
+
+Or: run `python3 get_chat_id.py` after step 3 below (it lists your recent chats).
+
+### 3. Configure
 
 ```bash
 cp config.example.json config.json
 ```
 
-Edit `config.json` with your details:
+Edit `config.json`:
 
 | Field | Value |
 |-------|-------|
-| `imap_server` | `imap.hostinger.com` (already set) |
 | `email` | Your Hostinger email address |
 | `password` | Your Hostinger email password |
-| `telegram_bot_token` | Your bot token from @BotFather |
-| `telegram_chat_id` | The chat ID from step 1 |
+| `telegram_api_id` | From step 1 (a number) |
+| `telegram_api_hash` | From step 1 (a hex string) |
+| `telegram_phone` | Your phone number with country code, e.g. `+491234567890` |
+| `telegram_chat_id` | From step 2 |
 | `watch_senders` | List of sender email addresses to forward |
 
-### 3. Install on your Mac
+### 4. Install
 
 ```bash
 bash install_mac.sh
 ```
 
-This installs a background service that starts automatically on login.
+On first run, Telegram sends a login code to your phone — enter it in the terminal. After that, the session is saved and no further login is needed.
 
-### 4. Bookmark the dashboard
+### 5. Bookmark the dashboard
 
 Open `http://localhost:9876` in Arc and bookmark it.
-Click the bookmark anytime to pause/resume the forwarder.
+Click the bookmark anytime to pause/resume.
 
 ## Usage
 
-- **Toggle on/off**: Visit `http://localhost:9876` and click the button
+- **Toggle on/off**: Visit `http://localhost:9876`
 - **View logs**: `tail -f forwarder.log`
-- **Stop service**: `launchctl unload ~/Library/LaunchAgents/com.email-forwarder.plist`
-- **Start service**: `launchctl load ~/Library/LaunchAgents/com.email-forwarder.plist`
+- **Stop**: `launchctl unload ~/Library/LaunchAgents/com.email-forwarder.plist`
+- **Start**: `launchctl load ~/Library/LaunchAgents/com.email-forwarder.plist`
 - **Uninstall**: `launchctl unload ~/Library/LaunchAgents/com.email-forwarder.plist && rm ~/Library/LaunchAgents/com.email-forwarder.plist`
