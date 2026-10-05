@@ -3,3 +3,4 @@ config.json
 forwarder.log
 __pycache__/
 telegram_session.session
+.venv/
