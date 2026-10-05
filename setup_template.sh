@@ -78,8 +78,25 @@ cat > "$PLIST" <<PLIST_EOF
 </plist>
 PLIST_EOF
 
-launchctl bootout "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || launchctl unload "$PLIST" >/dev/null 2>&1
-launchctl bootstrap "gui/$(id -u)" "$PLIST" >/dev/null 2>&1 || launchctl load "$PLIST" >/dev/null 2>&1
+DOMAIN="gui/$(id -u)"
+
+# Stop any previous copy and wait for it to actually go away: bootout returns
+# before the process exits, and bootstrapping over a dying job fails with EIO.
+launchctl bootout "$DOMAIN/$LABEL" >/dev/null 2>&1
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break
+  sleep 1
+done
+
+BOOT_ERR="$(launchctl bootstrap "$DOMAIN" "$PLIST" 2>&1)"
+if [ $? -ne 0 ]; then
+  BOOT_ERR="$(launchctl load -w "$PLIST" 2>&1)"
+  [ $? -eq 0 ] || die "could not register the background service: $BOOT_ERR"
+fi
+
+launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 \
+  || die "the background service did not register"
+info "service registered"
 
 PORT="$("$PY" -c "import json;print(json.load(open('$APP_DIR/config.json')).get('dashboard_port',9876))" 2>/dev/null || echo 9876)"
 
