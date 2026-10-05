@@ -14,6 +14,7 @@ from telethon.errors import (
     PhoneCodeInvalidError,
     SessionPasswordNeededError,
 )
+from telethon.tl.functions.auth import ResendCodeRequest
 
 BASE = Path(__file__).resolve().parent
 CONFIG_PATH = BASE / "config.json"
@@ -85,19 +86,49 @@ def try_imap(cfg, password, quiet=False):
 
 # ---------------------------------------------------------------- telegram
 
+WHERE = {
+    "SentCodeTypeApp": "the Telegram app itself - open the chat named "
+                       "'Telegram' (blue tick) on any device signed in as this number",
+    "SentCodeTypeSms": "SMS",
+    "SentCodeTypeCall": "an automated phone call",
+    "SentCodeTypeFlashCall": "a flash call",
+    "SentCodeTypeMissedCall": "a missed call - the code is the last digits of the "
+                              "number that calls you",
+    "SentCodeTypeEmailCode": "your email",
+}
+
+
+def describe(code_type):
+    return WHERE.get(type(code_type).__name__, type(code_type).__name__)
+
+
 async def sign_in(client, phone):
     print(f"\n  Sending a login code to {phone} ...")
     sent = await client.send_code_request(phone)
-    print("  Check the Telegram app for the code.\n")
+    print(f"  Sent via {describe(sent.type)}.")
+    if getattr(sent, "next_type", None):
+        print(f"  Type 'r' instead of the code to resend it via {describe(sent.next_type)}.")
+    print()
 
-    for attempt in range(3):
-        code = ask("  Code: ")
+    attempt = 0
+    while attempt < 4:
+        code = ask("  Code (or 'r' to resend): ")
+
+        if code.lower() in ("r", "resend"):
+            try:
+                sent = await client(ResendCodeRequest(
+                    phone_number=phone, phone_code_hash=sent.phone_code_hash))
+                print(f"  Resent via {describe(sent.type)}.\n")
+            except Exception as exc:
+                print(f"  Could not resend ({exc}).\n")
+            continue
+
+        attempt += 1
         try:
             await client.sign_in(phone=phone, code=code, phone_code_hash=sent.phone_code_hash)
             return
         except PhoneCodeInvalidError:
-            if attempt < 2:
-                print("  That code was not right.\n")
+            print("  That code was not right.\n")
         except PhoneCodeExpiredError:
             sys.exit("  That code expired - run the installer again.")
         except SessionPasswordNeededError:
