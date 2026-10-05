@@ -137,8 +137,29 @@ def discover_chats(token):
     return list(chats.items())
 
 
+def verify_chat(cfg):
+    """Check whether the saved chat_id still works by sending a silent getChat."""
+    chat_id = cfg.get("telegram_chat_id")
+    if not chat_id:
+        return None
+    try:
+        info = call_api(cfg["telegram_bot_token"], "getChat", {"chat_id": chat_id})
+        return (info.get("title")
+                or " ".join(filter(None, [info.get("first_name"), info.get("last_name")]))
+                or info.get("username")
+                or str(chat_id))
+    except TelegramError:
+        return None
+
+
 def setup_chat(cfg, bot):
     print("\n  --- Target chat ---")
+
+    name = verify_chat(cfg)
+    if name:
+        print(f"  Already set: {name}")
+        return name
+
     username = bot["username"]
     print(f"\n  In Telegram, open the chat that should receive the emails, then:")
     print(f"    - if it is a group: add @{username} to it")
