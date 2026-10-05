@@ -55,15 +55,18 @@ def main():
     template = (BASE / "setup_template.sh").read_text()
     forwarder = (BASE / "email_to_telegram.py").read_text()
     helper = (BASE / "setup_helper.py").read_text()
+    menubar = (BASE / "menubar_toggle.swift").read_text()
     config_json = json.dumps(config, indent=2)
 
     check_no_delimiter(forwarder, "FORWARDER_EOF", "email_to_telegram.py")
     check_no_delimiter(helper, "HELPER_EOF", "setup_helper.py")
     check_no_delimiter(config_json, "CONFIG_EOF", "config")
+    check_no_delimiter(menubar, "MENUBAR_EOF", "menubar_toggle.swift")
 
     script = (template
               .replace("__FORWARDER_PY__", forwarder.rstrip("\n"))
               .replace("__HELPER_PY__", helper.rstrip("\n"))
+              .replace("__MENUBAR_SWIFT__", menubar.rstrip("\n"))
               .replace("__CONFIG_JSON__", config_json))
 
     OUT.write_text(script)

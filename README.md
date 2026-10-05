@@ -5,7 +5,7 @@ Telegram chat.
 
 - **Instant** — uses IMAP IDLE, so the server pushes as mail arrives
 - **No dependencies** — Python standard library only, no pip, no venv
-- **One-click pause** — a small page at `http://localhost:9876`
+- **One-click pause** — an envelope icon in the macOS menu bar
 - **Always on** — a launchd agent that starts at login
 
 Messages are delivered by a Telegram bot. An earlier version signed in as a
@@ -63,11 +63,18 @@ the installer collects them and verifies each one before writing it.
 
 | | |
 |---|---|
-| Pause / resume | `http://localhost:9876` |
-| Log | `~/EmailForwarder/forwarder.log` |
-| Stop | `launchctl bootout gui/$(id -u)/com.moritz.emailforwarder` |
+| Pause / resume | Click the ✉ envelope in the menu bar |
+| Log | `~/EmailForwarder/forwarder.log` (or "Open Log" in the menu) |
+| Stop forwarder | `launchctl bootout gui/$(id -u)/com.moritz.emailforwarder` |
+| Stop menu icon | `launchctl bootout gui/$(id -u)/com.moritz.emailforwarder.menubar` |
 | Start | `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.moritz.emailforwarder.plist` |
-| Remove | stop it, then delete `~/EmailForwarder` and the plist |
+| Remove | stop both, then delete `~/EmailForwarder` and the plists |
+
+The menu bar icon is a native macOS status item compiled from Swift at install
+time. It reads `state.json` for display and toggles through the forwarder's
+HTTP endpoint, so it has no extra dependencies. If `swiftc` is not available
+(no Xcode Command Line Tools), the installer falls back to the web dashboard
+at `http://localhost:9876`.
 
 Pausing drops matching mail rather than queuing it, so resuming does not replay
 a backlog. A send that fails is retried on the next pass, and the messages behind
@@ -96,6 +103,7 @@ code is found the full email is sent instead, so nothing is quietly lost.
 | File | Role |
 |---|---|
 | `email_to_telegram.py` | The forwarder: IMAP watcher, Bot API client, pause page |
+| `menubar_toggle.swift` | Menu bar icon: pause/resume toggle, compiled at install |
 | `setup_helper.py` | Interactive setup: mailbox check, bot token, chat picker |
 | `setup_template.sh` | Installer shell, with placeholders for the above |
 | `build_installer.py` | Fills the template to produce the `.command` file |
