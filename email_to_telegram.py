@@ -227,12 +227,29 @@ def connect_imap(cfg):
     return mail
 
 
+def watch_list(cfg):
+    """Clean the configured senders. A blank entry would match every address."""
+    return [s.lower().strip() for s in cfg["watch_senders"] if s and s.strip()]
+
+
 def matches(sender, watch):
-    return any(w == sender or w in sender for w in watch)
+    """An entry with @ is a whole address; a bare domain covers its subdomains."""
+    if not sender:
+        return False
+    domain = sender.rpartition("@")[2]
+    for entry in watch:
+        if "@" in entry:
+            if sender == entry:
+                return True
+        elif domain == entry or domain.endswith("." + entry):
+            return True
+    return False
 
 
 def check_mailbox(mail, cfg):
-    watch = [s.lower().strip() for s in cfg["watch_senders"]]
+    watch = watch_list(cfg)
+    if not watch:
+        return
     typ, data = mail.uid("search", None, "UNSEEN")
     if typ != "OK" or not data or not data[0]:
         return
@@ -429,6 +446,11 @@ def main():
         log(f"ERROR: config.json is missing: {', '.join(missing)}")
         sys.exit(1)
 
+    watch = watch_list(cfg)
+    if not watch:
+        log("ERROR: watch_senders is empty, so nothing would be matched.")
+        sys.exit(1)
+
     bot = call_api(cfg["telegram_bot_token"], "getMe", {})
     log(f"Telegram bot: @{bot.get('username')}")
 
@@ -436,7 +458,7 @@ def main():
     server = HTTPServer(("127.0.0.1", port), Dashboard)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     log(f"Dashboard: http://localhost:{port}")
-    log("Watching for mail from: " + ", ".join(cfg["watch_senders"]))
+    log("Watching for mail from: " + ", ".join(watch))
 
     def stop(_sig, _frame):
         log("Shutting down")
