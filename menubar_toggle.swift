@@ -41,7 +41,11 @@ class App: NSObject, NSApplicationDelegate {
 
     func refresh() {
         let (on, n, last) = state()
-        item.button?.title = on ? "\u{2709}\u{FE0E}" : "\u{2709}\u{FE0E} \u{23F8}"
+        let icon = on ? "\u{2709}\u{FE0E}" : "\u{2709}\u{FE0E}\u{23F8}"
+        let attr = NSAttributedString(string: icon, attributes: [
+            .font: NSFont.systemFont(ofSize: 18)
+        ])
+        item.button?.attributedTitle = attr
         item.menu?.item(withTag: 1)?.title = "Forwarded: \(n)"
         item.menu?.item(withTag: 2)?.title = "Checked: \(last)"
         item.menu?.items.first?.title = on ? "\u{23F8}  Pause" : "\u{25B6}\u{FE0F}  Resume"
