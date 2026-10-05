@@ -62,26 +62,32 @@ _lock = threading.Lock()
 
 
 def _blank_state():
-    return {"enabled": True, "last_check": None, "forwarded_count": 0, "seen_uids": []}
+    # last_uid is a high-water mark: everything at or below it is dealt with.
+    return {"enabled": True, "last_check": None, "forwarded_count": 0,
+            "last_uid": 0, "uidvalidity": 0}
 
 
 def load_state():
-    if STATE_PATH.exists():
-        try:
-            s = _blank_state()
-            s.update(json.loads(STATE_PATH.read_text()))
-            return s
-        except (OSError, ValueError):
-            pass
-    return _blank_state()
+    if not STATE_PATH.exists():
+        return _blank_state()
+    try:
+        stored = json.loads(STATE_PATH.read_text())
+    except (OSError, ValueError):
+        return _blank_state()
+
+    s = _blank_state()
+    s.update(stored)
+    # Carry over from the version that kept a capped list of handled UIDs.
+    if not s["last_uid"] and stored.get("seen_uids"):
+        s["last_uid"] = max(int(u) for u in stored["seen_uids"])
+    s.pop("seen_uids", None)
+    return s
 
 
 state = load_state()
-seen_uids = set(state.get("seen_uids", []))
 
 
 def save_state():
-    state["seen_uids"] = sorted(seen_uids, key=int)[-500:]
     tmp = STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2))
     tmp.replace(STATE_PATH)
@@ -246,53 +252,87 @@ def matches(sender, watch):
     return False
 
 
+def highest_uid(mail):
+    typ, data = mail.uid("search", None, "ALL")
+    if typ != "OK" or not data or not data[0]:
+        return 0
+    return max(int(u) for u in data[0].split())
+
+
+def align_to_mailbox(mail):
+    """
+    Anchor the high-water mark, and reset it if the mailbox was rebuilt.
+
+    Starting at zero on a mailbox with a backlog would forward the entire
+    history at once, so a fresh install begins from whatever is there now.
+    """
+    typ, data = mail.status("INBOX", "(UIDVALIDITY)")
+    validity = 0
+    if typ == "OK" and data:
+        found = re.search(rb"UIDVALIDITY (\d+)", data[0])
+        if found:
+            validity = int(found.group(1))
+
+    with _lock:
+        if not state["last_uid"]:
+            state["last_uid"] = highest_uid(mail)
+            state["uidvalidity"] = validity
+            log(f"Starting from the current end of the mailbox (uid {state['last_uid']})")
+        elif validity and state["uidvalidity"] and validity != state["uidvalidity"]:
+            state["last_uid"] = highest_uid(mail)
+            state["uidvalidity"] = validity
+            log("Mailbox was rebuilt by the server - re-anchoring to its current end")
+        elif validity and not state["uidvalidity"]:
+            state["uidvalidity"] = validity
+        save_state()
+
+
 def check_mailbox(mail, cfg):
     watch = watch_list(cfg)
     if not watch:
         return
-    typ, data = mail.uid("search", None, "UNSEEN")
+
+    with _lock:
+        last = state["last_uid"]
+
+    typ, data = mail.uid("search", None, f"UID {last + 1}:*")
     if typ != "OK" or not data or not data[0]:
         return
 
-    changed = False
-    for uid in data[0].split():
-        uid_str = uid.decode()
-        if uid_str in seen_uids:
-            continue
+    # 'UID n:*' still returns the final message when nothing is above n.
+    pending = sorted(u for u in (int(x) for x in data[0].split()) if u > last)
+    if not pending:
+        return
 
-        typ, payload = mail.uid("fetch", uid, "(BODY.PEEK[])")
+    changed = False
+    for uid in pending:
+        typ, payload = mail.uid("fetch", str(uid), "(BODY.PEEK[])")
         if typ != "OK" or not payload or not isinstance(payload[0], tuple):
-            continue
+            break  # leave the mark below it so the next pass retries
 
         msg = email.message_from_bytes(payload[0][1])
         sender = email.utils.parseaddr(msg.get("From", ""))[1].lower()
 
-        if not matches(sender, watch):
-            seen_uids.add(uid_str)
-            continue
+        if matches(sender, watch):
+            with _lock:
+                enabled = state["enabled"]
+            if enabled:
+                log(f"Forwarding from {sender}: {decode_mime_header(msg.get('Subject', ''))}")
+                try:
+                    send_message(cfg["telegram_bot_token"], cfg["telegram_chat_id"],
+                                 format_message(msg))
+                except TelegramError as exc:
+                    log(f"Could not send ({exc}) - retrying on the next pass")
+                    break  # stop here so nothing after it is skipped
+                with _lock:
+                    state["forwarded_count"] += 1
+                log("Sent")
+            else:
+                log(f"Paused - dropping mail from {sender}")
 
         with _lock:
-            enabled = state["enabled"]
-
-        if not enabled:
-            seen_uids.add(uid_str)
-            changed = True
-            log(f"Paused - dropping mail from {sender}")
-            continue
-
-        log(f"Forwarding from {sender}: {decode_mime_header(msg.get('Subject', ''))}")
-        try:
-            send_message(cfg["telegram_bot_token"], cfg["telegram_chat_id"],
-                         format_message(msg))
-        except TelegramError as exc:
-            log(f"Could not send ({exc}) - will retry on the next pass")
-            continue
-
-        seen_uids.add(uid_str)
-        with _lock:
-            state["forwarded_count"] += 1
+            state["last_uid"] = uid
         changed = True
-        log("Sent")
 
     if changed:
         with _lock:
@@ -337,6 +377,7 @@ def watch_mailbox(cfg):
             mail = connect_imap(cfg)
             use_idle = want_idle and supports_idle(mail)
             log("Connected - " + ("IDLE, instant" if use_idle else "polling every 15s"))
+            align_to_mailbox(mail)
 
             while True:
                 check_mailbox(mail, cfg)
