@@ -14,3 +14,4 @@ telegram_session.session
 .venv/
 __pycache__/
 EmailForwarderSetup.zip
+MenuBarIcon.zip
