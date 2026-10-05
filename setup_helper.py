@@ -32,6 +32,7 @@ def ask_secret(prompt):
 
 def save(cfg):
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+    CONFIG_PATH.chmod(0o600)
 
 
 # ---------------------------------------------------------------- mailbox
@@ -223,7 +224,9 @@ def load_config():
     if added:
         print(f"  Added new settings: {', '.join(added)}")
     if cfg != existing:
-        CONFIG_PATH.write_text(json.dumps(cfg, indent=2) + "\n")
+        save(cfg)
+    elif CONFIG_PATH.exists():
+        CONFIG_PATH.chmod(0o600)
     return cfg
 
 

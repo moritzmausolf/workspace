@@ -15,3 +15,5 @@ telegram_session.session
 __pycache__/
 EmailForwarderSetup.zip
 MenuBarIcon.zip
+Update Email Forwarder.command
+EmailForwarderUpdate.zip

@@ -15,6 +15,7 @@ from pathlib import Path
 BASE = Path(__file__).resolve().parent
 SETTINGS = BASE / "installer_config.json"
 OUT = BASE / "Setup Email Forwarder.command"
+UPDATE_OUT = BASE / "Update Email Forwarder.command"
 
 REQUIRED = ["imap_server", "email", "watch_senders"]
 
@@ -72,6 +73,13 @@ def main():
     OUT.write_text(script)
     OUT.chmod(OUT.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
     print(f"wrote {OUT.name} ({OUT.stat().st_size:,} bytes)")
+
+    update = ((BASE / "update_template.sh").read_text()
+              .replace("__FORWARDER_PY__", forwarder.rstrip("\n"))
+              .replace("__MENUBAR_SWIFT__", menubar.rstrip("\n")))
+    UPDATE_OUT.write_text(update)
+    UPDATE_OUT.chmod(UPDATE_OUT.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    print(f"wrote {UPDATE_OUT.name} ({UPDATE_OUT.stat().st_size:,} bytes)")
 
 
 if __name__ == "__main__":

@@ -485,7 +485,7 @@ button:active{transform:scale(.985)}
   <div class="meta">__COUNT__ forwarded<br>last checked __LAST__</div>
 </div>
 <script>
-async function t(){await fetch('/toggle',{method:'POST'});location.reload()}
+async function t(){await fetch('/toggle',{method:'POST',headers:{'X-Forwarder':'1'}});location.reload()}
 setTimeout(()=>location.reload(),30000);
 </script></body></html>"""
 
@@ -494,7 +494,18 @@ class Dashboard(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+    def local_host(self):
+        # Blocks DNS rebinding: a page on another domain pointed at 127.0.0.1.
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0]
+        return host in ("localhost", "127.0.0.1")
+
+    def refuse(self):
+        self.send_response(403)
+        self.end_headers()
+
     def do_GET(self):
+        if not self.local_host():
+            return self.refuse()
         with _lock:
             enabled, count = state["enabled"], state["forwarded_count"]
             last = state["last_check"] or "never"
@@ -516,6 +527,10 @@ class Dashboard(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        # Other websites cannot set a custom header without a CORS preflight,
+        # which this server never approves, so they cannot flip the switch.
+        if not self.local_host() or self.headers.get("X-Forwarder") != "1":
+            return self.refuse()
         with _lock:
             state["enabled"] = not state["enabled"]
             save_state()

@@ -76,6 +76,7 @@ class App: NSObject, NSApplicationDelegate {
     @objc func toggle() {
         var req = URLRequest(url: URL(string: "http://localhost:\(port)/toggle")!)
         req.httpMethod = "POST"
+        req.setValue("1", forHTTPHeaderField: "X-Forwarder")
         URLSession.shared.dataTask(with: req) { [weak self] _, _, _ in
             DispatchQueue.main.async { self?.refresh() }
         }.resume()
