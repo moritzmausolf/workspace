@@ -117,6 +117,11 @@ def call_api(token, method, params, timeout=20):
     return payload["result"]
 
 
+# Misconfiguration rather than a blip: retrying these only delays the error.
+PERMANENT = ("unauthorized", "chat not found", "bot was blocked",
+             "bot was kicked", "user is deactivated", "not enough rights")
+
+
 def send_message(token, chat_id, text):
     """Send one message, retrying transient failures and honouring rate limits."""
     for attempt in range(1, SEND_ATTEMPTS + 1):
@@ -135,6 +140,8 @@ def send_message(token, chat_id, text):
                 log(f"Telegram rate limit, waiting {delay}s")
                 time.sleep(delay)
                 continue
+            if any(p in message.lower() for p in PERMANENT):
+                raise
             if attempt == SEND_ATTEMPTS:
                 raise
             log(f"Telegram send failed ({message}), retrying")
