@@ -57,38 +57,50 @@ except TelegramError:
 
 print(f"\n  Codes currently go to: {current}\n")
 print("  In Telegram, open the NEW chat, then:")
-print(f"    - group: add @{bot} to it, then send  /start  in the group")
+print(f"    - group: add @{bot} to it, then send  /start@{bot}  in the group")
 print(f"    - just you: open @{bot} and press Start")
 print()
 
-while True:
+# A webhook left over from anything else makes getUpdates fail outright.
+try:
+    api("deleteWebhook", {})
+except TelegramError:
+    pass
+
+chats = {}
+while not chats:
     ask("  Press return once you have sent /start there ")
     try:
         updates = api("getUpdates", {"limit": 100, "timeout": 0})
     except TelegramError as exc:
         print(f"  Could not reach Telegram: {exc}\n")
         continue
-    chats = {}
     for u in updates:
         for key in ("message", "edited_message", "channel_post", "my_chat_member"):
             chat = (u.get(key) or {}).get("chat")
             if chat:
                 chats[chat["id"]] = (name_of(chat), chat.get("type", "chat"))
-    if chats:
-        break
-    print("  Nothing seen yet. Send /start in the new chat, then try again.\n")
-
-chats = list(chats.items())
-print()
-for i, (_cid, (name, kind)) in enumerate(chats, 1):
-    print(f"   {i:>3}.  {name[:44]:<44} {kind}")
-print()
-while True:
-    choice = ask(f"  Send codes to which one? (1-{len(chats)}): ")
-    if choice.isdigit() and 1 <= int(choice) <= len(chats):
-        chat_id, (name, _kind) = chats[int(choice) - 1]
-        break
-    print("  Enter one of the numbers above.")
+    if not chats:
+        print(f"  Nothing seen yet. In a group, send  /start@{bot}  (with the")
+        print("  @name) - a plain /start often never reaches the bot.\n")
+        if ask("  Type 'id' to enter a chat ID by hand, or return to retry: ") == "id":
+            print("\n  To find a group ID: forward any message from the group to")
+            print("  @JsonDumpBot - it replies with the chat id (groups start with -100).")
+            chat_id = ask("\n  Chat ID: ")
+            name = chat_id
+            break
+else:
+    chats = list(chats.items())
+    print()
+    for i, (_cid, (nm, kind)) in enumerate(chats, 1):
+        print(f"   {i:>3}.  {nm[:44]:<44} {kind}")
+    print()
+    while True:
+        choice = ask(f"  Send codes to which one? (1-{len(chats)}): ")
+        if choice.isdigit() and 1 <= int(choice) <= len(chats):
+            chat_id, (name, _kind) = chats[int(choice) - 1]
+            break
+        print("  Enter one of the numbers above.")
 
 try:
     api("sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
