@@ -18,7 +18,12 @@ done
 [ -n "$PY" ] || die "Python 3 not found."
 
 cd "$APP_DIR" || die "Could not open $APP_DIR"
-"$PY" - <<'PYEOF' || die "Chat was not changed."
+
+# Written to a file rather than piped in: reading the program from stdin would
+# leave the prompts below with nothing to read from.
+STEP="$APP_DIR/.change_chat.py"
+trap 'rm -f "$STEP"' EXIT
+cat > "$STEP" <<'PYEOF'
 import json, sys, time
 from pathlib import Path
 from email_to_telegram import TelegramError, call_api
@@ -113,6 +118,8 @@ path.write_text(json.dumps(cfg, indent=2) + "\n")
 path.chmod(0o600)
 print(f"\n  Switched to: {name}")
 PYEOF
+
+"$PY" "$STEP" || die "Chat was not changed."
 
 launchctl kickstart -k "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || die "Saved, but could not restart the forwarder."
 echo "  Forwarder restarted."
