@@ -1,0 +1,28 @@
+{
+  "telegram_bot_token": "123456789:AAE-replace-with-your-bot-token",
+  "dashboard_port": 9876,
+  "sources": [
+    {
+      "name": "Arc codes",
+      "imap_server": "imap.hostinger.com",
+      "imap_port": 993,
+      "email": "you@yourdomain.com",
+      "password": "mailbox-password",
+      "watch_senders": ["no-reply@app.redgifs.com"],
+      "telegram_chat_id": "-1001234567890",
+      "telegram_topic_id": 42,
+      "code_pattern": "\\b(\\d{6})\\b"
+    },
+    {
+      "name": "Reddit bans",
+      "imap_server": "imap.mail.me.com",
+      "imap_port": 993,
+      "email": "you@icloud.com",
+      "password": "app-specific-password-from-account.apple.com",
+      "watch_senders": ["redditmail.com"],
+      "telegram_chat_id": "-1001234567890",
+      "telegram_topic_id": 42,
+      "must_contain": "You have been permanently banned"
+    }
+  ]
+}

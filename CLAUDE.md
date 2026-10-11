@@ -20,7 +20,21 @@ avoid relearning the sharp edges.
 | `Add Mailbox.command` | Adds another mailbox, with its own senders and chat |
 | `Change Telegram Chat.command` | Re-points one mailbox, or all of them |
 | `Add Menu Bar Icon.command` | Compiles and starts just the menu bar icon |
+| `config.example.json` | The live config's shape, with placeholders for secrets |
 | `ready-to-run/` | Already-built installers, from the last `build_installer.py` run |
+
+## Restoring onto a Mac
+
+Run `ready-to-run/Setup Email Forwarder.command`, which creates
+`~/EmailForwarder`, writes the launchd agents and asks for the credentials.
+With a saved `config.json` to hand, copy it over the one the installer wrote
+and restart instead of re-entering anything:
+
+```bash
+cp config.json ~/EmailForwarder/config.json
+chmod 600 ~/EmailForwarder/config.json
+launchctl kickstart -k gui/$(id -u)/com.moritz.emailforwarder
+```
 
 ## Building
 
@@ -49,8 +63,10 @@ Two mailboxes, both posting into one topic of a Telegram forum group:
 
 ## Config shape
 
-`config.json` lives beside the forwarder at `~/EmailForwarder`, is `chmod 600`,
-and is never in this repository. Several mailboxes go in a `sources` list:
+`config.json` lives beside the forwarder at `~/EmailForwarder` and is `chmod
+600`. It holds every password and the bot token, so it is gitignored and never
+belongs in this repository; `config.example.json` shows the same shape with
+placeholders. Several mailboxes go in a `sources` list:
 
 ```json
 {
