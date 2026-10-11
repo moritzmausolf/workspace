@@ -101,6 +101,13 @@ try:
 except TelegramError:
     pass
 
+def typed_id():
+    """The chat the bot has not seen yet still has an id that can be typed."""
+    print("\n  Forward any message from that chat to @JsonDumpBot - it replies")
+    print("  with the chat id. Groups start with -100.")
+    return ask("\n  Chat ID: ")
+
+
 chats = {}
 while not chats:
     ask("  Press return once you have sent /start there ")
@@ -118,10 +125,7 @@ while not chats:
         print(f"  Nothing seen yet. In a group, send  /start@{bot}  (with the")
         print("  @name) - a plain /start often never reaches the bot.\n")
         if ask("  Type 'id' to enter a chat ID by hand, or return to retry: ") == "id":
-            print("\n  To find a group ID: forward any message from the group to")
-            print("  @JsonDumpBot - it replies with the chat id (groups start with -100).")
-            chat_id = ask("\n  Chat ID: ")
-            name = chat_id
+            chat_id = name = typed_id()
             break
 else:
     chats = list(chats.items())
@@ -129,12 +133,16 @@ else:
     for i, (_cid, (nm, kind)) in enumerate(chats, 1):
         print(f"   {i:>3}.  {nm[:44]:<44} {kind}")
     print()
+    print(f"  Only chats @{bot} is a member of can appear here.")
     while True:
-        choice = ask(f"  Send codes to which one? (1-{len(chats)}): ")
+        choice = ask(f"  Which one? (1-{len(chats)}, or 'id' to type one): ").lower()
+        if choice == "id":
+            chat_id = name = typed_id()
+            break
         if choice.isdigit() and 1 <= int(choice) <= len(chats):
             chat_id, (name, _kind) = chats[int(choice) - 1]
             break
-        print("  Enter one of the numbers above.")
+        print("  Enter one of the numbers above, or 'id'.")
 
 try:
     api("sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
