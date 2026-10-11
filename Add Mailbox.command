@@ -159,8 +159,17 @@ else:
             break
         print("  Enter one of the numbers above.")
 
-if str(chat_id) in {str(s.get("telegram_chat_id")) for s in existing}:
-    print("\n  Note: that is the same group an existing mailbox already posts to.")
+elsewhere = [s for s in existing if str(s.get("telegram_chat_id")) != str(chat_id)]
+moved = []
+if elsewhere:
+    print()
+    print("  These still post somewhere else:")
+    for src in elsewhere:
+        print(f"    - {src['name']}")
+    if ask("Send those to the same group too? (y/n)", "y").lower().startswith("y"):
+        for src in elsewhere:
+            src["telegram_chat_id"] = str(chat_id)
+        moved = elsewhere
 
 new = {
     "name": label,
@@ -183,13 +192,15 @@ except TelegramError as exc:
 
 # Fold the single-mailbox shape into the list before appending to it.
 cfg["sources"] = existing + [new]
-for moved in ("imap_server", "imap_port", "email", "password", "watch_senders",
+for stale in ("imap_server", "imap_port", "email", "password", "watch_senders",
               "telegram_chat_id", "code_pattern", "must_contain", "name"):
-    cfg.pop(moved, None)
+    cfg.pop(stale, None)
 
 path.write_text(json.dumps(cfg, indent=2) + "\n")
 path.chmod(0o600)
 print(f"\n  Added '{label}' -> {where}")
+for src in moved:
+    print(f"  Moved '{src['name']}' -> {where}")
 print(f"  Now watching {len(cfg['sources'])} mailboxes.")
 PYEOF
 
