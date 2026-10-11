@@ -84,6 +84,37 @@ Progress is a high-water mark on the IMAP UID, so nothing is re-sent however
 large the mailbox grows, and mail read elsewhere first is still forwarded. A new
 install starts from the current end of the mailbox rather than replaying history.
 
+## Watching more than one mailbox
+
+`config.json` can hold a `sources` list instead of a single mailbox. Each entry
+has its own server, credentials, senders and target chat, and runs on its own
+IMAP connection, so unrelated mail can land in unrelated groups:
+
+```json
+"sources": [
+  {"name": "Arc codes", "imap_server": "imap.hostinger.com",
+   "email": "...", "password": "...", "watch_senders": ["no-reply@app.redgifs.com"],
+   "telegram_chat_id": "-100...", "code_pattern": "\\b(\\d{6})\\b"},
+  {"name": "Reddit bans", "imap_server": "imap.mail.me.com",
+   "email": "...@icloud.com", "password": "...", "watch_senders": ["redditmail.com"],
+   "telegram_chat_id": "-100...", "must_contain": "You have been permanently banned"}
+]
+```
+
+`must_contain` narrows a source further: the sender must match *and* that
+wording must appear in the subject or body, which is how one noisy sender can
+be reduced to the few mails worth forwarding. `code_pattern` is deliberately
+per-source and never inherited, so a pattern meant for one mailbox cannot
+quietly shorten another one's mail to a stray number.
+
+The pause switch, the forwarded counter and the menu bar icon are shared — one
+click pauses every mailbox. Each mailbox tracks its own position in
+`state.json` under `sources`, keyed by server and address.
+
+An older single-mailbox `config.json` is read as one source and keeps working
+untouched, including its place in the mailbox. iCloud rejects normal passwords
+over IMAP, so it needs an app-specific password from account.apple.com.
+
 ## Forwarding only a code
 
 With `code_pattern` set to something like `\b(\d{6})\b`, a verification email
@@ -107,3 +138,5 @@ code is found the full email is sent instead, so nothing is quietly lost.
 | `setup_helper.py` | Interactive setup: mailbox check, bot token, chat picker |
 | `setup_template.sh` | Installer shell, with placeholders for the above |
 | `build_installer.py` | Fills the template to produce the `.command` file |
+| `Add Mailbox.command` | Adds another mailbox, with its own senders and group |
+| `Change Telegram Chat.command` | Points one mailbox at a different chat |

@@ -55,12 +55,34 @@ def name_of(chat):
             or chat.get("username") or str(chat["id"]))
 
 bot = api("getMe", {})["username"]
-try:
-    current = name_of(api("getChat", {"chat_id": cfg["telegram_chat_id"]}))
-except TelegramError:
-    current = cfg.get("telegram_chat_id") or "none"
 
-print(f"\n  Codes currently go to: {current}\n")
+# An install with several mailboxes keeps them in a list; an older one holds a
+# single mailbox at the top level.
+listed = cfg.get("sources") or []
+slot = None
+if len(listed) > 1:
+    print("\n  Which mailbox should post somewhere else?\n")
+    for i, src in enumerate(listed, 1):
+        print(f"   {i:>3}.  {src.get('name') or src.get('email')}")
+    print()
+    while True:
+        choice = ask(f"  Which one? (1-{len(listed)}): ")
+        if choice.isdigit() and 1 <= int(choice) <= len(listed):
+            slot = int(choice) - 1
+            break
+        print("  Enter one of the numbers above.")
+elif listed:
+    slot = 0
+
+holder = listed[slot] if slot is not None else cfg
+try:
+    # Only for display, so one attempt: no need to retry a chat that is gone.
+    current = name_of(call_api(token, "getChat", {"chat_id": holder["telegram_chat_id"]}))
+except (TelegramError, KeyError):
+    current = holder.get("telegram_chat_id") or "none"
+
+label = holder.get("name") or "Codes"
+print(f"\n  {label} currently go to: {current}\n")
 print("  In Telegram, open the NEW chat, then:")
 print(f"    - group: add @{bot} to it, then send  /start@{bot}  in the group")
 print(f"    - just you: open @{bot} and press Start")
@@ -109,11 +131,11 @@ else:
 
 try:
     api("sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                        "text": "<b>Email codes will arrive here from now on.</b>"})
+                        "text": f"<b>{label} will arrive here from now on.</b>"})
 except TelegramError as exc:
     sys.exit(f"  The bot cannot post in that chat: {exc}")
 
-cfg["telegram_chat_id"] = str(chat_id)
+holder["telegram_chat_id"] = str(chat_id)
 path.write_text(json.dumps(cfg, indent=2) + "\n")
 path.chmod(0o600)
 print(f"\n  Switched to: {name}")

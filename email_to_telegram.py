@@ -62,12 +62,18 @@ _lock = threading.Lock()
 
 
 def _blank_state():
-    # last_uid is a high-water mark: everything at or below it is dealt with.
+    # Each mailbox keeps a high-water mark: everything at or below it is dealt
+    # with. enabled and the counters stay shared, so one pause covers them all.
     return {"enabled": True, "last_check": None, "forwarded_count": 0,
-            "last_uid": 0, "uidvalidity": 0}
+            "sources": {}}
+
+
+# A mark left by the single-mailbox build, adopted by the first mailbox below.
+_legacy_mark = None
 
 
 def load_state():
+    global _legacy_mark
     if not STATE_PATH.exists():
         return _blank_state()
     try:
@@ -77,10 +83,18 @@ def load_state():
 
     s = _blank_state()
     s.update(stored)
+    s["sources"] = dict(stored.get("sources") or {})
+
+    last_uid = stored.get("last_uid") or 0
     # Carry over from the version that kept a capped list of handled UIDs.
-    if not s["last_uid"] and stored.get("seen_uids"):
-        s["last_uid"] = max(int(u) for u in stored["seen_uids"])
-    s.pop("seen_uids", None)
+    if not last_uid and stored.get("seen_uids"):
+        last_uid = max(int(u) for u in stored["seen_uids"])
+    if last_uid:
+        _legacy_mark = {"last_uid": last_uid,
+                        "uidvalidity": stored.get("uidvalidity") or 0}
+
+    for gone in ("seen_uids", "last_uid", "uidvalidity"):
+        s.pop(gone, None)
     return s
 
 
@@ -91,6 +105,39 @@ def save_state():
     tmp = STATE_PATH.with_suffix(".tmp")
     tmp.write_text(json.dumps(state, indent=2))
     tmp.replace(STATE_PATH)
+
+
+# Carried into a source only when it was written at the top level, so a new
+# mailbox never inherits the code pattern meant for a different one.
+SOURCE_FIELDS = ("imap_server", "imap_port", "email", "password", "name",
+                 "watch_senders", "telegram_chat_id", "code_pattern",
+                 "must_contain", "mode")
+
+
+def sources(cfg):
+    """
+    One entry per watched mailbox.
+
+    Earlier builds described a single mailbox at the top level, so that shape
+    is read as one source and an existing config keeps working untouched.
+    """
+    listed = cfg.get("sources") or [{k: cfg[k] for k in SOURCE_FIELDS if k in cfg}]
+    out = []
+    for i, src in enumerate(listed, 1):
+        merged = {k: cfg[k] for k in ("imap_port", "mode") if k in cfg}
+        merged.update(src)
+        merged.setdefault("name", merged.get("email") or f"mailbox {i}")
+        out.append(merged)
+    return out
+
+
+def source_key(src):
+    return f"{src['imap_server']}/{src['email']}"
+
+
+def mark_of(key):
+    """The high-water mark for one mailbox. Call with the lock held."""
+    return state["sources"].setdefault(key, {"last_uid": 0, "uidvalidity": 0})
 
 
 # --------------------------------------------------------------------------
@@ -274,16 +321,16 @@ def format_message(msg, cfg=None):
 # imap
 # --------------------------------------------------------------------------
 
-def connect_imap(cfg):
-    mail = imaplib.IMAP4_SSL(cfg["imap_server"], cfg.get("imap_port", 993))
-    mail.login(cfg["email"], cfg["password"])
+def connect_imap(src):
+    mail = imaplib.IMAP4_SSL(src["imap_server"], src.get("imap_port", 993))
+    mail.login(src["email"], src["password"])
     mail.select("INBOX")
     return mail
 
 
-def watch_list(cfg):
+def watch_list(src):
     """Clean the configured senders. A blank entry would match every address."""
-    return [s.lower().strip() for s in cfg["watch_senders"] if s and s.strip()]
+    return [s.lower().strip() for s in src["watch_senders"] if s and s.strip()]
 
 
 def matches(sender, watch):
@@ -307,7 +354,7 @@ def highest_uid(mail):
     return max(int(u) for u in data[0].split())
 
 
-def align_to_mailbox(mail):
+def align_to_mailbox(mail, key, say):
     """
     Anchor the high-water mark, and reset it if the mailbox was rebuilt.
 
@@ -322,26 +369,36 @@ def align_to_mailbox(mail):
             validity = int(found.group(1))
 
     with _lock:
-        if not state["last_uid"]:
-            state["last_uid"] = highest_uid(mail)
-            state["uidvalidity"] = validity
-            log(f"Starting from the current end of the mailbox (uid {state['last_uid']})")
-        elif validity and state["uidvalidity"] and validity != state["uidvalidity"]:
-            state["last_uid"] = highest_uid(mail)
-            state["uidvalidity"] = validity
-            log("Mailbox was rebuilt by the server - re-anchoring to its current end")
-        elif validity and not state["uidvalidity"]:
-            state["uidvalidity"] = validity
+        mark = mark_of(key)
+        if not mark["last_uid"]:
+            mark["last_uid"] = highest_uid(mail)
+            mark["uidvalidity"] = validity
+            say(f"Starting from the current end of the mailbox (uid {mark['last_uid']})")
+        elif validity and mark["uidvalidity"] and validity != mark["uidvalidity"]:
+            mark["last_uid"] = highest_uid(mail)
+            mark["uidvalidity"] = validity
+            say("Mailbox was rebuilt by the server - re-anchoring to its current end")
+        elif validity and not mark["uidvalidity"]:
+            mark["uidvalidity"] = validity
         save_state()
 
 
-def check_mailbox(mail, cfg):
-    watch = watch_list(cfg)
+def wanted(msg, src):
+    """A source may also insist on some wording appearing in the mail itself."""
+    needle = (src.get("must_contain") or "").strip().lower()
+    if not needle:
+        return True
+    subject = decode_mime_header(msg.get("Subject", "")).lower()
+    return needle in subject or needle in extract_body(msg).lower()
+
+
+def check_mailbox(mail, src, token, key, say):
+    watch = watch_list(src)
     if not watch:
         return
 
     with _lock:
-        last = state["last_uid"]
+        last = mark_of(key)["last_uid"]
 
     typ, data = mail.uid("search", None, f"UID {last + 1}:*")
     if typ != "OK" or not data or not data[0]:
@@ -361,25 +418,25 @@ def check_mailbox(mail, cfg):
         msg = email.message_from_bytes(payload[0][1])
         sender = email.utils.parseaddr(msg.get("From", ""))[1].lower()
 
-        if matches(sender, watch):
+        if matches(sender, watch) and wanted(msg, src):
             with _lock:
                 enabled = state["enabled"]
             if enabled:
-                log(f"Forwarding from {sender}: {decode_mime_header(msg.get('Subject', ''))}")
+                say(f"Forwarding from {sender}: {decode_mime_header(msg.get('Subject', ''))}")
                 try:
-                    send_message(cfg["telegram_bot_token"], cfg["telegram_chat_id"],
-                                 format_message(msg, cfg))
+                    send_message(token, src["telegram_chat_id"],
+                                 format_message(msg, src))
                 except TelegramError as exc:
-                    log(f"Could not send ({exc}) - retrying on the next pass")
+                    say(f"Could not send ({exc}) - retrying on the next pass")
                     break  # stop here so nothing after it is skipped
                 with _lock:
                     state["forwarded_count"] += 1
-                log("Sent")
+                say("Sent")
             else:
-                log(f"Paused - dropping mail from {sender}")
+                say(f"Paused - dropping mail from {sender}")
 
         with _lock:
-            state["last_uid"] = uid
+            mark_of(key)["last_uid"] = uid
         changed = True
 
     if changed:
@@ -416,19 +473,21 @@ def supports_idle(mail):
     return any((c.decode() if isinstance(c, bytes) else c).upper() == "IDLE" for c in caps)
 
 
-def watch_mailbox(cfg):
-    want_idle = cfg.get("mode", "idle") != "poll"
+def watch_mailbox(src, token):
+    key = source_key(src)
+    say = lambda msg: log(f"[{src['name']}] {msg}")  # noqa: E731
+    want_idle = src.get("mode", "idle") != "poll"
     while True:
         mail = None
         try:
-            log(f"Connecting to {cfg['imap_server']} ...")
-            mail = connect_imap(cfg)
+            say(f"Connecting to {src['imap_server']} ...")
+            mail = connect_imap(src)
             use_idle = want_idle and supports_idle(mail)
-            log("Connected - " + ("IDLE, instant" if use_idle else "polling every 15s"))
-            align_to_mailbox(mail)
+            say("Connected - " + ("IDLE, instant" if use_idle else "polling every 15s"))
+            align_to_mailbox(mail, key, say)
 
             while True:
-                check_mailbox(mail, cfg)
+                check_mailbox(mail, src, token, key, say)
                 with _lock:
                     state["last_check"] = now()
                     save_state()
@@ -439,7 +498,7 @@ def watch_mailbox(cfg):
                 mail.noop()
 
         except Exception as exc:
-            log(f"Mailbox error: {exc} - reconnecting in 10s")
+            say(f"Mailbox error: {exc} - reconnecting in 10s")
             time.sleep(10)
         finally:
             if mail is not None:
@@ -543,26 +602,35 @@ class Dashboard(BaseHTTPRequestHandler):
 
 def main():
     cfg = load_config()
-    required = ["imap_server", "email", "password",
-                "telegram_bot_token", "telegram_chat_id", "watch_senders"]
-    missing = [k for k in required if not cfg.get(k)]
-    if missing:
-        log(f"ERROR: config.json is missing: {', '.join(missing)}")
+    token = cfg.get("telegram_bot_token")
+    if not token:
+        log("ERROR: config.json is missing: telegram_bot_token")
         sys.exit(1)
 
-    watch = watch_list(cfg)
-    if not watch:
-        log("ERROR: watch_senders is empty, so nothing would be matched.")
-        sys.exit(1)
+    watched = sources(cfg)
+    for src in watched:
+        missing = [k for k in ("imap_server", "email", "password",
+                               "telegram_chat_id", "watch_senders")
+                   if not src.get(k)]
+        if missing:
+            log(f"ERROR: mailbox '{src['name']}' is missing: {', '.join(missing)}")
+            sys.exit(1)
+        if not watch_list(src):
+            log(f"ERROR: '{src['name']}' has no senders, so nothing would be matched.")
+            sys.exit(1)
 
-    bot = call_api(cfg["telegram_bot_token"], "getMe", {})
+    if _legacy_mark:
+        with _lock:
+            state["sources"].setdefault(source_key(watched[0]), _legacy_mark)
+            save_state()
+
+    bot = call_api(token, "getMe", {})
     log(f"Telegram bot: @{bot.get('username')}")
 
     port = cfg.get("dashboard_port", 9876)
     server = HTTPServer(("127.0.0.1", port), Dashboard)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     log(f"Dashboard: http://localhost:{port}")
-    log("Watching for mail from: " + ", ".join(watch))
 
     def stop(_sig, _frame):
         log("Shutting down")
@@ -572,7 +640,16 @@ def main():
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
 
-    watch_mailbox(cfg)
+    for src in watched:
+        log(f"[{src['name']}] watching {src['email']} for mail from "
+            + ", ".join(watch_list(src)))
+
+    threads = [threading.Thread(target=watch_mailbox, args=(src, token), daemon=True)
+               for src in watched]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
 
 if __name__ == "__main__":
