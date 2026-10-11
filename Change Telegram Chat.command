@@ -24,7 +24,7 @@ cd "$APP_DIR" || die "Could not open $APP_DIR"
 STEP="$APP_DIR/.change_chat.py"
 trap 'rm -f "$STEP"' EXIT
 cat > "$STEP" <<'PYEOF'
-import json, sys, time
+import json, re, sys, time
 from pathlib import Path
 from email_to_telegram import TelegramError, call_api
 
@@ -92,6 +92,7 @@ else:
     print(f"\n  {label} currently go to: {current}\n")
 print("  In Telegram, open the NEW chat, then:")
 print(f"    - group: add @{bot} to it, then send  /start@{bot}  in the group")
+print(f"    - a topic inside a group: send  /start@{bot}  in that topic")
 print(f"    - just you: open @{bot} and press Start")
 print()
 
@@ -101,11 +102,41 @@ try:
 except TelegramError:
     pass
 
-def typed_id():
-    """The chat the bot has not seen yet still has an id that can be typed."""
-    print("\n  Forward any message from that chat to @JsonDumpBot - it replies")
-    print("  with the chat id. Groups start with -100.")
-    return ask("\n  Chat ID: ")
+def parse_link(raw):
+    """
+    Read a chat, and a topic when there is one, out of a message link.
+
+    In a group with topics a link reads .../<chat>/<topic>/<message>, so the
+    middle number only means a topic when a message number follows it.
+    """
+    raw = raw.strip()
+    found = re.search(r"t\.me/c/(\d+)(?:/(\d+))?(?:/(\d+))?", raw)
+    if found:
+        topic = int(found.group(2)) if found.group(2) and found.group(3) else None
+        return int("-100" + found.group(1)), topic
+    found = re.search(r"t\.me/([A-Za-z][\w]{3,})(?:/(\d+))?(?:/(\d+))?", raw)
+    if found:
+        topic = int(found.group(2)) if found.group(2) and found.group(3) else None
+        return "@" + found.group(1), topic
+    return raw, None
+
+
+def typed_target():
+    """A chat the bot has not posted in yet can still be named by hand."""
+    print("\n  In Telegram, right-click a message in that chat or topic and")
+    print("  choose 'Copy Message Link', then paste it here. A plain chat id")
+    print("  works too (groups start with -100).")
+    return parse_link(ask("\n  Link or chat ID: "))
+
+
+def topic_of(msg):
+    """The forum topic a message sits in, when the group has topics turned on."""
+    tid = msg.get("message_thread_id")
+    if not tid:
+        return None, None
+    named = ((msg.get("reply_to_message") or {}).get("forum_topic_created")
+             or msg.get("forum_topic_created") or {})
+    return tid, named.get("name")
 
 
 chats = {}
@@ -118,42 +149,59 @@ while not chats:
         continue
     for u in updates:
         for key in ("message", "edited_message", "channel_post", "my_chat_member"):
-            chat = (u.get(key) or {}).get("chat")
-            if chat:
-                chats[chat["id"]] = (name_of(chat), chat.get("type", "chat"))
+            msg = u.get(key) or {}
+            chat = msg.get("chat")
+            if not chat:
+                continue
+            tid, tname = topic_of(msg)
+            shown = name_of(chat)
+            if tid:
+                shown += "  >  " + (tname or f"topic {tid}")
+            chats[(chat["id"], tid)] = (shown, chat.get("type", "chat"))
     if not chats:
         print(f"  Nothing seen yet. In a group, send  /start@{bot}  (with the")
         print("  @name) - a plain /start often never reaches the bot.\n")
-        if ask("  Type 'id' to enter a chat ID by hand, or return to retry: ") == "id":
-            chat_id = name = typed_id()
+        if ask("  Type 'id' to enter a chat by hand, or return to retry: ") == "id":
+            chat_id, topic_id = typed_target()
+            name = f"{chat_id}" + (f" topic {topic_id}" if topic_id else "")
             break
 else:
     chats = list(chats.items())
     print()
-    for i, (_cid, (nm, kind)) in enumerate(chats, 1):
-        print(f"   {i:>3}.  {nm[:44]:<44} {kind}")
+    for i, ((_cid, _tid), (nm, kind)) in enumerate(chats, 1):
+        print(f"   {i:>3}.  {nm[:48]:<48} {kind}")
     print()
-    print(f"  Only chats @{bot} is a member of can appear here.")
+    print(f"  Only chats @{bot} has been used in can appear here. A topic shows")
+    print("  up once /start is sent inside that topic; otherwise choose 'id'.")
     while True:
-        choice = ask(f"  Which one? (1-{len(chats)}, or 'id' to type one): ").lower()
+        choice = ask(f"  Which one? (1-{len(chats)}, or 'id' to paste a link): ").lower()
         if choice == "id":
-            chat_id = name = typed_id()
+            chat_id, topic_id = typed_target()
+            name = f"{chat_id}" + (f" topic {topic_id}" if topic_id else "")
             break
         if choice.isdigit() and 1 <= int(choice) <= len(chats):
-            chat_id, (name, _kind) = chats[int(choice) - 1]
+            (chat_id, topic_id), (name, _kind) = chats[int(choice) - 1]
             break
         print("  Enter one of the numbers above, or 'id'.")
 
+probe = {"chat_id": chat_id, "parse_mode": "HTML",
+         "text": f"<b>{label} will arrive here from now on.</b>"}
+if topic_id:
+    probe["message_thread_id"] = topic_id
 try:
-    api("sendMessage", {"chat_id": chat_id, "parse_mode": "HTML",
-                        "text": f"<b>{label} will arrive here from now on.</b>"})
+    api("sendMessage", probe)
 except TelegramError as exc:
-    sys.exit(f"  The bot cannot post in that chat: {exc}")
+    sys.exit(f"  The bot cannot post there: {exc}")
 
 for target in targets:
     target["telegram_chat_id"] = str(chat_id)
+    if topic_id:
+        target["telegram_topic_id"] = topic_id
+    else:
+        target.pop("telegram_topic_id", None)
 path.write_text(json.dumps(cfg, indent=2) + "\n")
 path.chmod(0o600)
+print()
 for target in targets:
     print(f"  {target.get('name') or 'Codes'} -> {name}")
 PYEOF

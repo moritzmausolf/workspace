@@ -110,8 +110,8 @@ def save_state():
 # Carried into a source only when it was written at the top level, so a new
 # mailbox never inherits the code pattern meant for a different one.
 SOURCE_FIELDS = ("imap_server", "imap_port", "email", "password", "name",
-                 "watch_senders", "telegram_chat_id", "code_pattern",
-                 "must_contain", "mode")
+                 "watch_senders", "telegram_chat_id", "telegram_topic_id",
+                 "code_pattern", "must_contain", "mode")
 
 
 def sources(cfg):
@@ -175,16 +175,22 @@ PERMANENT = ("unauthorized", "chat not found", "bot was blocked",
              "bot was kicked", "user is deactivated", "not enough rights")
 
 
-def send_message(token, chat_id, text):
+def send_message(token, chat_id, text, topic_id=None):
     """Send one message, retrying transient failures and honouring rate limits."""
+    params = {
+        "chat_id": chat_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "true",
+    }
+    # A group with topics turned on needs the topic named, or the message
+    # lands in the group's General topic instead.
+    if topic_id:
+        params["message_thread_id"] = topic_id
+
     for attempt in range(1, SEND_ATTEMPTS + 1):
         try:
-            return call_api(token, "sendMessage", {
-                "chat_id": chat_id,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": "true",
-            })
+            return call_api(token, "sendMessage", params)
         except TelegramError as exc:
             message = str(exc)
             wait = re.search(r"retry after (\d+)", message, re.I)
@@ -425,7 +431,8 @@ def check_mailbox(mail, src, token, key, say):
                 say(f"Forwarding from {sender}: {decode_mime_header(msg.get('Subject', ''))}")
                 try:
                     send_message(token, src["telegram_chat_id"],
-                                 format_message(msg, src))
+                                 format_message(msg, src),
+                                 src.get("telegram_topic_id"))
                 except TelegramError as exc:
                     say(f"Could not send ({exc}) - retrying on the next pass")
                     break  # stop here so nothing after it is skipped
