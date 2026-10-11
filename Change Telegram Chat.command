@@ -59,30 +59,37 @@ bot = api("getMe", {})["username"]
 # An install with several mailboxes keeps them in a list; an older one holds a
 # single mailbox at the top level.
 listed = cfg.get("sources") or []
-slot = None
 if len(listed) > 1:
     print("\n  Which mailbox should post somewhere else?\n")
     for i, src in enumerate(listed, 1):
         print(f"   {i:>3}.  {src.get('name') or src.get('email')}")
+    print("     a.  all of them")
     print()
     while True:
-        choice = ask(f"  Which one? (1-{len(listed)}): ")
-        if choice.isdigit() and 1 <= int(choice) <= len(listed):
-            slot = int(choice) - 1
+        choice = ask(f"  Which one? (1-{len(listed)}, or a): ").lower()
+        if choice == "a":
+            targets = listed
             break
-        print("  Enter one of the numbers above.")
-elif listed:
-    slot = 0
+        if choice.isdigit() and 1 <= int(choice) <= len(listed):
+            targets = [listed[int(choice) - 1]]
+            break
+        print("  Enter one of the numbers above, or 'a' for all of them.")
+else:
+    # One mailbox in a list, or an older install holding it at the top level.
+    targets = [listed[0]] if listed else [cfg]
 
-holder = listed[slot] if slot is not None else cfg
-try:
-    # Only for display, so one attempt: no need to retry a chat that is gone.
-    current = name_of(call_api(token, "getChat", {"chat_id": holder["telegram_chat_id"]}))
-except (TelegramError, KeyError):
-    current = holder.get("telegram_chat_id") or "none"
-
-label = holder.get("name") or "Codes"
-print(f"\n  {label} currently go to: {current}\n")
+if len(targets) > 1:
+    label = "All mail"
+    print(f"\n  Moving all {len(targets)} mailboxes to one chat.\n")
+else:
+    label = targets[0].get("name") or "Codes"
+    try:
+        # Only for display, so one attempt: no need to retry a chat that is gone.
+        current = name_of(call_api(token, "getChat",
+                                   {"chat_id": targets[0]["telegram_chat_id"]}))
+    except (TelegramError, KeyError):
+        current = targets[0].get("telegram_chat_id") or "none"
+    print(f"\n  {label} currently go to: {current}\n")
 print("  In Telegram, open the NEW chat, then:")
 print(f"    - group: add @{bot} to it, then send  /start@{bot}  in the group")
 print(f"    - just you: open @{bot} and press Start")
@@ -135,10 +142,12 @@ try:
 except TelegramError as exc:
     sys.exit(f"  The bot cannot post in that chat: {exc}")
 
-holder["telegram_chat_id"] = str(chat_id)
+for target in targets:
+    target["telegram_chat_id"] = str(chat_id)
 path.write_text(json.dumps(cfg, indent=2) + "\n")
 path.chmod(0o600)
-print(f"\n  Switched to: {name}")
+for target in targets:
+    print(f"  {target.get('name') or 'Codes'} -> {name}")
 PYEOF
 
 "$PY" "$STEP" || die "Chat was not changed."
