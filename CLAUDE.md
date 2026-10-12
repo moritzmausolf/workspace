@@ -96,6 +96,9 @@ high-water mark under `state["sources"]`, keyed by server and address.
 
 ## Things that will bite you
 
+- **A Reddit ban arrives as modmail.** Its subject only says "You have a new
+  message in r/x"; the sentence that matters is in the body, so a source sets
+  `summary_pattern` to pull it out and send that alone under the account name.
 - **Match against `searchable_text()`, never the displayed body.** The body
   shown in Telegram is shortened to `BODY_LIMIT` and prefers the plain part, so
   a filter reading it would miss wording that sits further down or only in the

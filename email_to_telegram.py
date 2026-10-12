@@ -112,7 +112,7 @@ def save_state():
 SOURCE_FIELDS = ("imap_server", "imap_port", "email", "password", "name",
                  "watch_senders", "telegram_chat_id", "telegram_topic_id",
                  "code_pattern", "must_contain", "account_pattern",
-                 "folder", "mode")
+                 "summary_pattern", "folder", "mode")
 
 
 def sources(cfg):
@@ -289,9 +289,13 @@ def searchable_text(msg):
     return "\n".join(found)
 
 
-def flatten(text):
+def one_line(text):
     """One-space form: turning HTML into text puts line breaks mid-sentence."""
-    return re.sub(r"\s+", " ", text).strip().lower()
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def flatten(text):
+    return one_line(text).lower()
 
 
 # Words that tend to sit beside the code rather than beside an order number,
@@ -344,6 +348,22 @@ def find_account(msg, pattern):
     return (found.group(1) if found.groups() else found.group(0)).strip()
 
 
+def find_summary(msg, pattern):
+    """
+    The one sentence worth sending, when a source says how to recognise it.
+
+    Reddit delivers a ban as modmail, so the subject only says a message
+    arrived and the sentence that matters sits in the body.
+    """
+    try:
+        rx = re.compile(pattern, re.I)
+    except re.error as exc:
+        log(f"summary_pattern is not a valid expression ({exc}) - ignoring it")
+        return None
+    found = rx.search(one_line(searchable_text(msg)))
+    return found.group(0).strip() if found else None
+
+
 def format_message(msg, cfg=None):
     sender = decode_mime_header(msg.get("From", "Unknown"))
     subject = decode_mime_header(msg.get("Subject", "(no subject)"))
@@ -357,6 +377,12 @@ def format_message(msg, cfg=None):
             heading = f"<b>{html.escape(account)}</b>\n"
         else:
             log("No account name found in this email")
+
+    if cfg.get("summary_pattern"):
+        line = find_summary(msg, cfg["summary_pattern"])
+        if line:
+            return heading + html.escape(line)
+        log("No summary found in this email - sending it in full")
 
     pattern = cfg.get("code_pattern", "")
     if pattern:
