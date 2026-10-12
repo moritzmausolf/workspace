@@ -101,11 +101,29 @@ IMAP connection, so unrelated mail can land in unrelated groups:
 ]
 ```
 
-`must_contain` narrows a source further: the sender must match *and* that
-wording must appear in the subject or body, which is how one noisy sender can
-be reduced to the few mails worth forwarding. `code_pattern` is deliberately
-per-source and never inherited, so a pattern meant for one mailbox cannot
-quietly shorten another one's mail to a stray number.
+Each source takes these, all optional:
+
+| Field | Meaning |
+|---|---|
+| `must_contain` | Forward only when this wording appears anywhere in the mail. The sender must match *and* the wording be present, which reduces one noisy sender to the few mails worth having |
+| `code_pattern` | Send just the matched code instead of the mail. Never inherited between sources, so a pattern meant for one mailbox cannot shorten another one's mail to a stray number |
+| `account_pattern` | Put the account a mail concerns on the first line, from the first capture group |
+| `stop_at` | End the message before this wording, dropping the boilerplate that follows |
+| `telegram_topic_id` | Post into one topic of a group that has topics turned on |
+| `folder` | Watch a folder other than `INBOX`, for a sender a rule files elsewhere |
+
+Matching reads every part of the mail, plain and HTML, ignoring differences in
+whitespace — turning HTML into text breaks sentences across lines, and the
+shown body is shortened, so neither can be what a filter reads.
+
+A sender behind an Apple **Hide My Email** alias arrives rewritten, as
+`noreply_at_redditmail_com_<random>@icloud.com` rather than
+`noreply@redditmail.com`. `watch_senders` still names the real sender; the
+masked form is recognised as well.
+
+A forwarded mail carries no sender line, and link targets repeated in brackets
+after their own text are dropped, both of which only crowd the few sentences
+worth reading. A source whose links carry the meaning would want that back.
 
 The pause switch, the forwarded counter and the menu bar icon are shared — one
 click pauses every mailbox. Each mailbox tracks its own position in
@@ -137,6 +155,11 @@ code is found the full email is sent instead, so nothing is quietly lost.
 | `menubar_toggle.swift` | Menu bar icon: pause/resume toggle, compiled at install |
 | `setup_helper.py` | Interactive setup: mailbox check, bot token, chat picker |
 | `setup_template.sh` | Installer shell, with placeholders for the above |
-| `build_installer.py` | Fills the template to produce the `.command` file |
+| `update_template.sh` | Update shell: replaces the forwarder, keeps the config |
+| `build_installer.py` | Fills the templates to produce the `.command` files |
 | `Add Mailbox.command` | Adds another mailbox, with its own senders and group |
-| `Change Telegram Chat.command` | Points one mailbox at a different chat |
+| `Change Telegram Chat.command` | Points one mailbox, or all of them, at a different chat |
+| `Add Menu Bar Icon.command` | Compiles and starts just the menu bar icon |
+| `Check Mailboxes.command` | Read-only: can each mailbox be reached, would its mail match |
+| `Show Recent Mail.command` | Read-only: the newest mail per folder, with real sender addresses |
+| `config.example.json` | The live config's shape, with placeholders for secrets |
