@@ -20,6 +20,7 @@ avoid relearning the sharp edges.
 | `Add Mailbox.command` | Adds another mailbox, with its own senders and chat |
 | `Change Telegram Chat.command` | Re-points one mailbox, or all of them |
 | `Add Menu Bar Icon.command` | Compiles and starts just the menu bar icon |
+| `Check Mailboxes.command` | Read-only: can each mailbox be reached, would its mail match |
 | `config.example.json` | The live config's shape, with placeholders for secrets |
 | `ready-to-run/` | Already-built installers, from the last `build_installer.py` run |
 
@@ -95,6 +96,14 @@ high-water mark under `state["sources"]`, keyed by server and address.
 
 ## Things that will bite you
 
+- **Match against `searchable_text()`, never the displayed body.** The body
+  shown in Telegram is shortened to `BODY_LIMIT` and prefers the plain part, so
+  a filter reading it would miss wording that sits further down or only in the
+  HTML. Compare through `flatten()` too: turning HTML into text puts line
+  breaks mid-sentence, so a plain substring test fails on wording that spans
+  one.
+- **Only the chosen folder is watched, `INBOX` unless `folder` says otherwise.**
+  A mail rule filing a sender elsewhere makes mail vanish silently.
 - **`code_pattern` must never be inherited between sources.** A six-digit
   pattern meant for one mailbox would otherwise reduce another mailbox's mail
   to a stray number from its body. Only `imap_port` and `mode` are inherited.

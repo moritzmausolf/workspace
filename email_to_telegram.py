@@ -111,7 +111,8 @@ def save_state():
 # mailbox never inherits the code pattern meant for a different one.
 SOURCE_FIELDS = ("imap_server", "imap_port", "email", "password", "name",
                  "watch_senders", "telegram_chat_id", "telegram_topic_id",
-                 "code_pattern", "must_contain", "mode")
+                 "code_pattern", "must_contain", "account_pattern",
+                 "folder", "mode")
 
 
 def sources(cfg):
@@ -233,7 +234,7 @@ def strip_html(raw):
     return re.sub(r"\n{3,}", "\n\n", raw).strip()
 
 
-def extract_body(msg):
+def extract_body(msg, limit=BODY_LIMIT):
     plain = rich = ""
     if msg.is_multipart():
         for part in msg.walk():
@@ -256,10 +257,41 @@ def extract_body(msg):
             else:
                 plain = text
 
-    body = plain.strip() or strip_html(rich)
-    if len(body) > BODY_LIMIT:
-        body = body[:BODY_LIMIT].rstrip() + "\n\n[...truncated]"
+    body = plain.strip()
+    readable = strip_html(rich) if rich else ""
+    # Some senders leave only a stub in the plain part ("view this in your
+    # browser") and put what the mail actually says in the HTML.
+    if len(body) < 120 and len(readable) > len(body):
+        body = readable
+
+    if limit and len(body) > limit:
+        body = body[:limit].rstrip() + "\n\n[...truncated]"
     return body.strip()
+
+
+def searchable_text(msg):
+    """
+    Everything the mail says, for matching rather than display.
+
+    Senders often put wording in the HTML part that the plain-text part words
+    differently or drops, and the displayed body is shortened, so a filter that
+    read only that could miss a phrase sitting further down.
+    """
+    found = [decode_mime_header(msg.get("Subject", ""))]
+    for part in (msg.walk() if msg.is_multipart() else [msg]):
+        if part.get_content_maintype() == "multipart" or part.get_filename():
+            continue
+        payload = part.get_payload(decode=True)
+        if not payload:
+            continue
+        text = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+        found.append(strip_html(text) if part.get_content_type() == "text/html" else text)
+    return "\n".join(found)
+
+
+def flatten(text):
+    """One-space form: turning HTML into text puts line breaks mid-sentence."""
+    return re.sub(r"\s+", " ", text).strip().lower()
 
 
 # Words that tend to sit beside the code rather than beside an order number,
@@ -299,12 +331,34 @@ def find_code(subject, body, pattern):
     return None
 
 
+def find_account(msg, pattern):
+    """The account a mail is about, when the source says how to spot it."""
+    try:
+        rx = re.compile(pattern)
+    except re.error as exc:
+        log(f"account_pattern is not a valid expression ({exc}) - ignoring it")
+        return None
+    found = rx.search(searchable_text(msg))
+    if not found:
+        return None
+    return (found.group(1) if found.groups() else found.group(0)).strip()
+
+
 def format_message(msg, cfg=None):
     sender = decode_mime_header(msg.get("From", "Unknown"))
     subject = decode_mime_header(msg.get("Subject", "(no subject)"))
     body = extract_body(msg)
 
-    pattern = (cfg or {}).get("code_pattern", "")
+    cfg = cfg or {}
+    heading = ""
+    if cfg.get("account_pattern"):
+        account = find_account(msg, cfg["account_pattern"])
+        if account:
+            heading = f"<b>{html.escape(account)}</b>\n"
+        else:
+            log("No account name found in this email")
+
+    pattern = cfg.get("code_pattern", "")
     if pattern:
         code = find_code(subject, body, pattern)
         if code:
@@ -314,6 +368,7 @@ def format_message(msg, cfg=None):
         log("No code found in this email - sending it in full")
 
     text = (
+        heading +
         f"<b>{html.escape(subject)}</b>\n"
         f"<i>from {html.escape(sender)}</i>\n\n"
         f"{html.escape(body)}"
@@ -327,10 +382,17 @@ def format_message(msg, cfg=None):
 # imap
 # --------------------------------------------------------------------------
 
+def folder_of(src):
+    """Which mailbox folder to watch. A rule may file mail outside the inbox."""
+    return src.get("folder") or "INBOX"
+
+
 def connect_imap(src):
     mail = imaplib.IMAP4_SSL(src["imap_server"], src.get("imap_port", 993))
     mail.login(src["email"], src["password"])
-    mail.select("INBOX")
+    typ, _ = mail.select(f'"{folder_of(src)}"')
+    if typ != "OK":
+        raise imaplib.IMAP4.error(f"cannot open folder {folder_of(src)!r}")
     return mail
 
 
@@ -360,14 +422,14 @@ def highest_uid(mail):
     return max(int(u) for u in data[0].split())
 
 
-def align_to_mailbox(mail, key, say):
+def align_to_mailbox(mail, src, key, say):
     """
     Anchor the high-water mark, and reset it if the mailbox was rebuilt.
 
     Starting at zero on a mailbox with a backlog would forward the entire
     history at once, so a fresh install begins from whatever is there now.
     """
-    typ, data = mail.status("INBOX", "(UIDVALIDITY)")
+    typ, data = mail.status(f'"{folder_of(src)}"', "(UIDVALIDITY)")
     validity = 0
     if typ == "OK" and data:
         found = re.search(rb"UIDVALIDITY (\d+)", data[0])
@@ -391,11 +453,10 @@ def align_to_mailbox(mail, key, say):
 
 def wanted(msg, src):
     """A source may also insist on some wording appearing in the mail itself."""
-    needle = (src.get("must_contain") or "").strip().lower()
+    needle = flatten(src.get("must_contain") or "")
     if not needle:
         return True
-    subject = decode_mime_header(msg.get("Subject", "")).lower()
-    return needle in subject or needle in extract_body(msg).lower()
+    return needle in flatten(searchable_text(msg))
 
 
 def check_mailbox(mail, src, token, key, say):
@@ -487,11 +548,11 @@ def watch_mailbox(src, token):
     while True:
         mail = None
         try:
-            say(f"Connecting to {src['imap_server']} ...")
+            say(f"Connecting to {src['imap_server']} ({folder_of(src)}) ...")
             mail = connect_imap(src)
             use_idle = want_idle and supports_idle(mail)
             say("Connected - " + ("IDLE, instant" if use_idle else "polling every 15s"))
-            align_to_mailbox(mail, key, say)
+            align_to_mailbox(mail, src, key, say)
 
             while True:
                 check_mailbox(mail, src, token, key, say)
