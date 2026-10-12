@@ -69,32 +69,42 @@ for src in sources(cfg):
             typ, _ = box.select(f'"{folder}"', readonly=True)
             if typ != "OK":
                 continue
-            hits = []
-            for entry in watch:
-                typ, data = box.uid("search", None, "FROM", f'"{entry}"')
-                if typ == "OK" and data and data[0]:
-                    hits += data[0].split()
+            typ, data = box.uid("search", None, "ALL")
+            uids = data[0].split() if typ == "OK" and data and data[0] else []
         except Exception:
             continue
+
+        # Matched in Python, exactly as the forwarder does. A server-side
+        # search would miss a Hide My Email alias, whose header spells the
+        # real sender with underscores.
+        hits = []
+        for uid in uids[-40:]:
+            typ, payload = box.uid(
+                "fetch", uid, "(BODY.PEEK[HEADER.FIELDS (FROM)])")
+            if typ != "OK" or not payload or not isinstance(payload[0], tuple):
+                continue
+            head = email.message_from_bytes(payload[0][1])
+            sender = email.utils.parseaddr(head.get("From", ""))[1].lower()
+            if matches(sender, watch):
+                hits.append(uid)
         if not hits:
             continue
-        here = " (watched)" if folder.upper() == "INBOX" else "  <-- NOT the watched folder"
-        print(f"\n  {folder}: {len(set(hits))} mail from these senders{here}")
 
-        for uid in sorted(set(hits), key=int)[-4:]:
+        here = " (watched)" if folder.upper() == "INBOX" else "  <-- NOT the watched folder"
+        print(f"\n  {folder}: {len(hits)} of the last 40 are from these senders{here}")
+
+        for uid in hits[-4:]:
             typ, payload = box.uid("fetch", uid, "(BODY.PEEK[])")
             if typ != "OK" or not payload or not isinstance(payload[0], tuple):
                 continue
             msg = email.message_from_bytes(payload[0][1])
             sender = email.utils.parseaddr(msg.get("From", ""))[1].lower()
             subject = decode_mime_header(msg.get("Subject", ""))[:58]
-            ok_from = matches(sender, watch)
-            ok_text = wanted(msg, src)
             past = int(uid) > mark.get("last_uid", 0)
             print(f"    uid {uid.decode():>7}  {msg.get('Date', '')[:31]}")
             print(f"      {subject}")
-            print(f"      sender matches: {ok_from}   wording matches: {ok_text}"
-                  f"   newer than mark: {past}")
+            print(f"      from {sender[:66]}")
+            print(f"      wording matches: {wanted(msg, src)}   newer than mark: {past}")
             if src.get("account_pattern"):
                 print(f"      account name: {find_account(msg, src['account_pattern'])}")
     box.logout()
