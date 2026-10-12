@@ -348,6 +348,14 @@ def find_account(msg, pattern):
     return (found.group(1) if found.groups() else found.group(0)).strip()
 
 
+LINK_TARGET = re.compile(r"\s*\(\s*https?://[^)\s]*\s*\)")
+
+
+def drop_link_targets(text):
+    """Plain-text mail repeats every link as label(url); the label is enough."""
+    return LINK_TARGET.sub("", text)
+
+
 def cut_at(text, marker):
     """
     Drop the marker and everything after it.
@@ -364,13 +372,13 @@ def cut_at(text, marker):
 
 
 def format_message(msg, cfg=None):
-    sender = decode_mime_header(msg.get("From", "Unknown"))
     subject = decode_mime_header(msg.get("Subject", "(no subject)"))
     cfg = cfg or {}
     # Cut before shortening, so a marker past the display limit is still found.
     body = extract_body(msg, limit=None)
     if cfg.get("stop_at"):
         body = cut_at(body, cfg["stop_at"])
+    body = drop_link_targets(body)
     if len(body) > BODY_LIMIT:
         body = body[:BODY_LIMIT].rstrip() + "\n\n[...truncated]"
 
@@ -393,8 +401,7 @@ def format_message(msg, cfg=None):
 
     text = (
         heading +
-        f"<b>{html.escape(subject)}</b>\n"
-        f"<i>from {html.escape(sender)}</i>\n\n"
+        f"<b>{html.escape(subject)}</b>\n\n"
         f"{html.escape(body)}"
     )
     if len(text) > TELEGRAM_LIMIT:

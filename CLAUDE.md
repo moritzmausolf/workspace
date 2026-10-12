@@ -101,6 +101,11 @@ high-water mark under `state["sources"]`, keyed by server and address.
   appeal links and admin boilerplate, so the source sets `stop_at` to end the
   message at the sentence offering to answer questions. Reddit writes
   `/r/name` with a leading slash, which is easy to get wrong in a pattern.
+- **A forwarded mail shows no sender line.** With Hide My Email the From is an
+  opaque alias that says nothing the account name and subject do not, and
+  plain-text mail repeats every link as `label(url)`, so those bracketed
+  targets are dropped. Both would need revisiting for a source whose links
+  carry the meaning, such as a sign-in link behind "click here".
 - **Match against `searchable_text()`, never the displayed body.** The body
   shown in Telegram is shortened to `BODY_LIMIT` and prefers the plain part, so
   a filter reading it would miss wording that sits further down or only in the
