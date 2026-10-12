@@ -401,16 +401,37 @@ def watch_list(src):
     return [s.lower().strip() for s in src["watch_senders"] if s and s.strip()]
 
 
+def _runs(text):
+    """Everything but letters and digits becomes one underscore."""
+    return re.sub(r"[^a-z0-9]+", "_", text.lower())
+
+
+def masked_as(entry):
+    """
+    How Hide My Email writes this sender once Apple has relayed it.
+
+    A mail to one of those aliases arrives from
+    noreply_at_redditmail_com_<random>@icloud.com rather than from
+    noreply@redditmail.com, so the address alone would never match.
+    """
+    local, at, domain = entry.partition("@")
+    if at:
+        return f"{_runs(local)}_at_{_runs(domain)}"
+    return f"_at_{_runs(entry)}"
+
+
 def matches(sender, watch):
     """An entry with @ is a whole address; a bare domain covers its subdomains."""
     if not sender:
         return False
-    domain = sender.rpartition("@")[2]
+    local, _, domain = sender.rpartition("@")
     for entry in watch:
         if "@" in entry:
             if sender == entry:
                 return True
         elif domain == entry or domain.endswith("." + entry):
+            return True
+        if masked_as(entry) in _runs(local):
             return True
     return False
 

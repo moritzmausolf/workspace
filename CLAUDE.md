@@ -102,6 +102,12 @@ high-water mark under `state["sources"]`, keyed by server and address.
   HTML. Compare through `flatten()` too: turning HTML into text puts line
   breaks mid-sentence, so a plain substring test fails on wording that spans
   one.
+- **Hide My Email rewrites the sender.** Mail to an Apple alias arrives from
+  `noreply_at_redditmail_com_<random>@icloud.com`, not `noreply@redditmail.com`,
+  so neither the address nor the domain matches. `matches()` also compares the
+  masked form, which is why a `watch_senders` entry still names the real
+  sender. Each alias is per sender *and* per recipient alias, so one person's
+  several accounts with one service each arrive from a different address.
 - **Only the chosen folder is watched, `INBOX` unless `folder` says otherwise.**
   A mail rule filing a sender elsewhere makes mail vanish silently.
 - **`code_pattern` must never be inherited between sources.** A six-digit
