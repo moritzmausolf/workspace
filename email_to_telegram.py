@@ -112,7 +112,7 @@ def save_state():
 SOURCE_FIELDS = ("imap_server", "imap_port", "email", "password", "name",
                  "watch_senders", "telegram_chat_id", "telegram_topic_id",
                  "code_pattern", "must_contain", "account_pattern",
-                 "summary_pattern", "folder", "mode")
+                 "stop_at", "folder", "mode")
 
 
 def sources(cfg):
@@ -348,28 +348,32 @@ def find_account(msg, pattern):
     return (found.group(1) if found.groups() else found.group(0)).strip()
 
 
-def find_summary(msg, pattern):
+def cut_at(text, marker):
     """
-    The one sentence worth sending, when a source says how to recognise it.
+    Drop the marker and everything after it.
 
-    Reddit delivers a ban as modmail, so the subject only says a message
-    arrived and the sentence that matters sits in the body.
+    Matched a word at a time so it still works where turning HTML into text
+    has broken the sentence across lines.
     """
-    try:
-        rx = re.compile(pattern, re.I)
-    except re.error as exc:
-        log(f"summary_pattern is not a valid expression ({exc}) - ignoring it")
-        return None
-    found = rx.search(one_line(searchable_text(msg)))
-    return found.group(0).strip() if found else None
+    words = marker.split()
+    if not words:
+        return text
+    rx = re.compile(r"\s*" + r"\s+".join(re.escape(w) for w in words), re.I)
+    found = rx.search(text)
+    return text[:found.start()].rstrip() if found else text
 
 
 def format_message(msg, cfg=None):
     sender = decode_mime_header(msg.get("From", "Unknown"))
     subject = decode_mime_header(msg.get("Subject", "(no subject)"))
-    body = extract_body(msg)
-
     cfg = cfg or {}
+    # Cut before shortening, so a marker past the display limit is still found.
+    body = extract_body(msg, limit=None)
+    if cfg.get("stop_at"):
+        body = cut_at(body, cfg["stop_at"])
+    if len(body) > BODY_LIMIT:
+        body = body[:BODY_LIMIT].rstrip() + "\n\n[...truncated]"
+
     heading = ""
     if cfg.get("account_pattern"):
         account = find_account(msg, cfg["account_pattern"])
@@ -377,12 +381,6 @@ def format_message(msg, cfg=None):
             heading = f"<b>{html.escape(account)}</b>\n"
         else:
             log("No account name found in this email")
-
-    if cfg.get("summary_pattern"):
-        line = find_summary(msg, cfg["summary_pattern"])
-        if line:
-            return heading + html.escape(line)
-        log("No summary found in this email - sending it in full")
 
     pattern = cfg.get("code_pattern", "")
     if pattern:
