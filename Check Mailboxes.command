@@ -34,6 +34,13 @@ from email_to_telegram import (decode_mime_header, matches, sources, state,
 cfg = json.loads(Path("config.json").read_text())
 marks = state.get("sources", {})
 
+# Pausing drops matching mail rather than queuing it, and the mark moves on
+# regardless, so anything that arrived while paused is gone for good.
+paused = not state.get("enabled", True)
+print(f"\n  forwarding is {'PAUSED - matching mail is being dropped' if paused else 'on'}")
+print(f"  last checked: {state.get('last_check') or 'never'}")
+print(f"  forwarded so far: {state.get('forwarded_count', 0)}")
+
 for src in sources(cfg):
     print(f"\n--- {src['name']}  ({src['email']}) ---")
     watch = watch_list(src)
@@ -93,7 +100,7 @@ for src in sources(cfg):
         here = " (watched)" if folder.upper() == "INBOX" else "  <-- NOT the watched folder"
         print(f"\n  {folder}: {len(hits)} of the last 40 are from these senders{here}")
 
-        for uid in hits[-4:]:
+        for uid in hits[-6:]:
             typ, payload = box.uid("fetch", uid, "(BODY.PEEK[])")
             if typ != "OK" or not payload or not isinstance(payload[0], tuple):
                 continue
@@ -112,11 +119,21 @@ for src in sources(cfg):
 log = Path("forwarder.log")
 if log.exists():
     print("\n--- last lines of the log ---")
-    for line in log.read_text(errors="replace").splitlines()[-25:]:
+    for line in log.read_text(errors="replace").splitlines()[-40:]:
         print("  " + line)
 PYEOF
 
 "$PY" "$STEP"
+
+echo
+echo "--- background services ---"
+for L in com.moritz.emailforwarder com.moritz.emailforwarder.menubar; do
+  if launchctl print "gui/$(id -u)/$L" >/dev/null 2>&1; then
+    echo "  $L: loaded"
+  else
+    echo "  $L: NOT RUNNING"
+  fi
+done
 echo
 printf 'Press return to close.'
 read -r _
