@@ -33,6 +33,7 @@ CONFIG_PATH = BASE / "config.json"
 STATE_PATH = BASE / "state.json"
 
 TELEGRAM_LIMIT = 4096
+SNIP = "\n[...truncated]"
 BODY_LIMIT = 3000
 IDLE_SECONDS = 240
 SEND_ATTEMPTS = 3
@@ -399,14 +400,16 @@ def format_message(msg, cfg=None):
                     f"<i>{html.escape(subject)}</i>")
         log("No code found in this email - sending it in full")
 
-    text = (
-        heading +
-        f"<b>{html.escape(subject)}</b>\n\n"
-        f"{html.escape(body)}"
-    )
-    if len(text) > TELEGRAM_LIMIT:
-        text = text[: TELEGRAM_LIMIT - 20].rstrip() + "\n[...truncated]"
-    return text
+    # Trimming the finished markup could cut through a tag or a &amp;, which
+    # Telegram rejects outright, so the body is shortened before escaping.
+    head = heading + f"<b>{html.escape(subject[:300])}</b>\n\n"
+    room = max(0, TELEGRAM_LIMIT - len(head) - len(SNIP))
+    if len(html.escape(body)) <= room:
+        return head + html.escape(body)
+    while body and len(html.escape(body)) > room:
+        over = len(html.escape(body)) - room
+        body = body[: max(0, len(body) - over)].rstrip()
+    return head + html.escape(body) + SNIP
 
 
 # --------------------------------------------------------------------------
@@ -537,7 +540,12 @@ def check_mailbox(mail, src, token, key, say):
         msg = email.message_from_bytes(payload[0][1])
         sender = email.utils.parseaddr(msg.get("From", ""))[1].lower()
 
-        if matches(sender, watch) and wanted(msg, src):
+        from_watched = matches(sender, watch)
+        if from_watched and not wanted(msg, src):
+            say(f"Skipped, wording not found: "
+                f"{decode_mime_header(msg.get('Subject', ''))[:60]}")
+
+        if from_watched and wanted(msg, src):
             with _lock:
                 enabled = state["enabled"]
             if enabled:
